@@ -6,6 +6,7 @@ import NetworkExtension
 enum TunnelsManagerError: WireGuardAppError {
     case tunnelNameEmpty
     case tunnelAlreadyExistsWithThatName
+    case tunnelConfigurationNotAvailable
     case systemErrorOnListingTunnels(systemError: Error)
     case systemErrorOnAddTunnel(systemError: Error)
     case systemErrorOnModifyTunnel(systemError: Error)
@@ -17,6 +18,8 @@ enum TunnelsManagerError: WireGuardAppError {
             return (tr("alertTunnelNameEmptyTitle"), tr("alertTunnelNameEmptyMessage"))
         case .tunnelAlreadyExistsWithThatName:
             return (tr("alertTunnelAlreadyExistsWithThatNameTitle"), tr("alertTunnelAlreadyExistsWithThatNameMessage"))
+        case .tunnelConfigurationNotAvailable:
+            return (tr("alertTunnelConfigurationNotAvailableTitle"), tr("alertTunnelConfigurationNotAvailableMessage"))
         case .systemErrorOnListingTunnels(let systemError):
             return (tr("alertSystemErrorOnListingTunnelsTitle"), systemError.localizedUIString)
         case .systemErrorOnAddTunnel(let systemError):

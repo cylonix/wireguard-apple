@@ -38,3 +38,12 @@ extension PeerConfiguration: Hashable {
 
     }
 }
+
+// __BEGIN_CYLONIX_MOD__
+extension PeerConfiguration: CustomStringConvertible {
+    public var description: String {
+        return "<\(type(of: self)): [\(publicKey.hexKey[...String.Index(encodedOffset: 5)])]"
+    }
+}
+
+// __END_CYLONIX_MOD__

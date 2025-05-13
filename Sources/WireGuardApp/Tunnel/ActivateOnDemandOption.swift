@@ -41,6 +41,7 @@ extension ActivateOnDemandOption {
                 rules = ssidOnDemandRules(option: ssidOption) + [NEOnDemandRuleConnect(interfaceType: nonWiFiInterfaceType)]
             }
         }
+        wg_log(.info, message: "Tunnel '\(tunnelProviderManager.localizedDescription ?? "nil")' applying on demand option: \(rules)")
         tunnelProviderManager.onDemandRules = rules
         tunnelProviderManager.isOnDemandEnabled = (rules != nil) && tunnelProviderManager.isOnDemandEnabled
     }

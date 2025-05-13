@@ -7,6 +7,7 @@ public final class TunnelConfiguration {
     public var name: String?
     public var interface: InterfaceConfiguration
     public let peers: [PeerConfiguration]
+    public var serverAddress: String = ""
 
     public init(name: String?, interface: InterfaceConfiguration, peers: [PeerConfiguration]) {
         self.interface = interface
@@ -19,12 +20,28 @@ public final class TunnelConfiguration {
             fatalError("Two or more peers cannot have the same public key")
         }
     }
+
+    public convenience init(name: String?, interface: InterfaceConfiguration, peers: [PeerConfiguration], serverAddress: String) {
+        self.init(name: name, interface: interface, peers: peers)
+        self.serverAddress = serverAddress
+    }
 }
 
 extension TunnelConfiguration: Equatable {
     public static func == (lhs: TunnelConfiguration, rhs: TunnelConfiguration) -> Bool {
+        wg_log(.debug, message: "Comparing tunnel configurations \(lhs.description) and \(rhs.description)")
         return lhs.name == rhs.name &&
             lhs.interface == rhs.interface &&
+            //lhs.serverAddress == rhs.serverAddress && // WgQuick does not use this field. Ignore for now.
             Set(lhs.peers) == Set(rhs.peers)
     }
 }
+
+// __BEGIN_CYLONIX_MOD__
+extension TunnelConfiguration: CustomStringConvertible {
+    public var description: String {
+        return "<\(type(of: self)): '\(serverAddress)' \(name ?? ""), \(interface), peers: \(peers)"
+    }
+}
+
+// __END_CYXLONID_MOD__

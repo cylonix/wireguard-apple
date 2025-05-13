@@ -20,7 +20,7 @@
 #include "ringlogger.h"
 
 enum {
-	MAX_LOG_LINE_LENGTH = 512,
+	MAX_LOG_LINE_LENGTH = 1024,
 	MAX_LINES = 2048,
 	MAGIC = 0xabadbeefU
 };

@@ -33,6 +33,25 @@ class TunnelsManager {
         startObservingTunnelConfigurations()
     }
 
+    static func isPrepared(completionHandler: @escaping (Result<Bool, TunnelsManagerError>) -> Void) {
+        wg_log(.info, message: "Checking if the system is prepared for tunnels...")
+        NETunnelProviderManager.loadAllFromPreferences { managers, error in
+            if let error = error {
+                wg_log(.error, message: "Failed to load tunnel provider managers: \(error)")
+                completionHandler(.failure(TunnelsManagerError.systemErrorOnListingTunnels(systemError: error)))
+                return
+            }
+
+            wg_log(.info, message: "Tunnel managers count: \(managers?.count ?? 0)")
+            if let managers = managers {
+                let isReady = !managers.isEmpty
+                completionHandler(.success(isReady))
+            } else {
+                completionHandler(.success(false))
+            }
+        }
+    }
+
     static func create(completionHandler: @escaping (Result<TunnelsManager, TunnelsManagerError>) -> Void) {
         #if targetEnvironment(simulator)
         completionHandler(.success(TunnelsManager(tunnelProviders: MockTunnels.createMockTunnels())))
@@ -49,10 +68,13 @@ class TunnelsManager {
             var tunnelNames: Set<String> = []
             for (index, tunnelManager) in tunnelManagers.enumerated().reversed() {
                 if let tunnelName = tunnelManager.localizedDescription {
+                    wg_log(.info, message: "Tunnel '\(tunnelName)' found in providers.")
                     tunnelNames.insert(tunnelName)
                 }
+                let tunnelName = tunnelManager.localizedDescription ?? "unknown"
                 guard let proto = tunnelManager.protocolConfiguration as? NETunnelProviderProtocol else { continue }
                 if proto.migrateConfigurationIfNeeded(called: tunnelManager.localizedDescription ?? "unknown") {
+                    wg_log(.info, message: "Configuration of tunnel '\(tunnelName)' is to be migrated.")
                     tunnelManager.saveToPreferences { _ in }
                 }
                 #if os(iOS)
@@ -68,6 +90,7 @@ class TunnelsManager {
                 #error("Unimplemented")
                 #endif
                 if let ref = passwordRef {
+                    wg_log(.info, message: "Tunnel '\(tunnelName)' added to be deleted from keychain references.")
                     refs.insert(ref)
                 } else {
                     wg_log(.info, message: "Removing orphaned tunnel with non-verifying keychain entry: \(tunnelManager.localizedDescription ?? "<unknown>")")
@@ -84,14 +107,19 @@ class TunnelsManager {
         #endif
     }
 
-    func reload() {
+    func reload(completionHandler: @escaping () -> Void) {
+        wg_log(.info, staticMessage: "reload tunnel list")
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
-            guard let self = self else { return }
+            guard let self = self else {
+                completionHandler()
+                return
+            }
 
             let loadedTunnelProviders = managers ?? []
 
             for (index, currentTunnel) in self.tunnels.enumerated().reversed() {
                 if !loadedTunnelProviders.contains(where: { $0.isEquivalentTo(currentTunnel) }) {
+                    wg_log(.info, message: "Tunnel '\(currentTunnel.name)' is removed. Remove it from the list.")
                     // Tunnel was deleted outside the app
                     self.tunnels.remove(at: index)
                     self.tunnelsListDelegate?.tunnelRemoved(at: index, tunnel: currentTunnel)
@@ -99,6 +127,7 @@ class TunnelsManager {
             }
             for loadedTunnelProvider in loadedTunnelProviders {
                 if let matchingTunnel = self.tunnels.first(where: { loadedTunnelProvider.isEquivalentTo($0) }) {
+                    wg_log(.info, message: "Tunnel '\(matchingTunnel.name)' matches existing. Update and refresh status. Provider changed is \(matchingTunnel.tunnelProvider != loadedTunnelProvider).")
                     matchingTunnel.tunnelProvider = loadedTunnelProvider
                     matchingTunnel.refreshStatus()
                 } else {
@@ -112,8 +141,10 @@ class TunnelsManager {
                     self.tunnels.append(tunnel)
                     self.tunnels.sort { TunnelsManager.tunnelNameIsLessThan($0.name, $1.name) }
                     self.tunnelsListDelegate?.tunnelAdded(at: self.tunnels.firstIndex(of: tunnel)!)
+                    wg_log(.info, message: "Tunnel '\(tunnel.name)' was added outside of the APP. Append it.")
                 }
             }
+            completionHandler()
         }
     }
 
@@ -160,14 +191,39 @@ class TunnelsManager {
             }
             #endif
 
-            let tunnel = TunnelContainer(tunnel: tunnelProviderManager)
-            self.tunnels.append(tunnel)
-            self.tunnels.sort { TunnelsManager.tunnelNameIsLessThan($0.name, $1.name) }
-            self.tunnelsListDelegate?.tunnelAdded(at: self.tunnels.firstIndex(of: tunnel)!)
-            completionHandler(.success(tunnel))
+             // Wait for the configuration to be available
+             self.waitForTunnelToBeAvailable(tunnelName: tunnelName, maxAttempts: 5) { [weak self] success in
+                 if success {
+                     guard let self = self else { return }
+                     let tunnel = TunnelContainer(tunnel: tunnelProviderManager)
+                     self.tunnels.append(tunnel)
+                     self.tunnels.sort { TunnelsManager.tunnelNameIsLessThan($0.name, $1.name) }
+                     self.tunnelsListDelegate?.tunnelAdded(at: self.tunnels.firstIndex(of: tunnel)!)
+                     completionHandler(.success(tunnel))
+                 } else {
+                     wg_log(.error, message: "Timeout waiting for tunnel configuration to be available")
+                     completionHandler(.failure(TunnelsManagerError.tunnelConfigurationNotAvailable))
+                 }
+             }
         }
     }
+    private func waitForTunnelToBeAvailable(tunnelName: String, maxAttempts: Int, attempt: Int = 0, completion: @escaping (Bool) -> Void) {
+        guard attempt < maxAttempts else {
+            completion(false)
+            return
+        }
 
+        // Wait for 200ms between attempts
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+                if let _ = managers?.first(where: { $0.localizedDescription == tunnelName }) {
+                    completion(true)
+                } else {
+                    self.waitForTunnelToBeAvailable(tunnelName: tunnelName, maxAttempts: maxAttempts, attempt: attempt + 1, completion: completion)
+                }
+            }
+        }
+    }
     func addMultiple(tunnelConfigurations: [TunnelConfiguration], completionHandler: @escaping (UInt, TunnelsManagerError?) -> Void) {
         // Temporarily pause observation of changes to VPN configurations to prevent the feedback
         // loop that causes `reload()` to be called on each newly added tunnel, which significantly
@@ -181,7 +237,7 @@ class TunnelsManager {
             self?.startObservingTunnelConfigurations()
 
             // Force reload all configurations to make sure that all tunnels are up to date.
-            self?.reload()
+            self?.reload(){}
         }
     }
 
@@ -234,6 +290,7 @@ class TunnelsManager {
         let oldName = tunnelProviderManager.localizedDescription ?? ""
         let isNameChanged = tunnelName != oldName
         if isNameChanged {
+            wg_log(.info, message: "Modify: name changed from \(oldName) to \(tunnelName)")
             guard !tunnels.contains(where: { $0.name == tunnelName }) else {
                 completionHandler(TunnelsManagerError.tunnelAlreadyExistsWithThatName)
                 return
@@ -242,7 +299,9 @@ class TunnelsManager {
         }
 
         var isTunnelConfigurationChanged = false
-        if tunnelProviderManager.tunnelConfiguration != tunnelConfiguration {
+        let oldTunnelConfiguration = tunnelProviderManager.tunnelConfiguration
+        if oldTunnelConfiguration! != tunnelConfiguration {
+            wg_log(.info, message: "Modify: config changed from \(oldTunnelConfiguration) to \(tunnelConfiguration)")
             tunnelProviderManager.setTunnelConfiguration(tunnelConfiguration)
             isTunnelConfigurationChanged = true
         }
@@ -277,6 +336,7 @@ class TunnelsManager {
                 if tunnel.status == .active || tunnel.status == .activating || tunnel.status == .reasserting {
                     // Turn off the tunnel, and then turn it back on, so the changes are made effective
                     tunnel.status = .restarting
+                    wg_log(.info, staticMessage: "stopping tunnel due to config change")
                     (tunnel.tunnelProvider.connection as? NETunnelProviderSession)?.stopTunnel()
                 }
             }
@@ -303,7 +363,10 @@ class TunnelsManager {
         let tunnelProviderManager = tunnel.tunnelProvider
         #if os(macOS)
         if tunnel.isTunnelAvailableToUser {
+            wg_log(.info, message: "Remove: Tunnel '\(tunnel.name)' is available to user. Removing it.")
             (tunnelProviderManager.protocolConfiguration as? NETunnelProviderProtocol)?.destroyConfigurationReference()
+        } else {
+            wg_log(.info, message: "Remove: Tunnel '\(tunnel.name)' is not available to user. SKip Removing it.")
         }
         #elseif os(iOS)
         (tunnelProviderManager.protocolConfiguration as? NETunnelProviderProtocol)?.destroyConfigurationReference()
@@ -341,7 +404,7 @@ class TunnelsManager {
             self?.startObservingTunnelConfigurations()
 
             // Force reload all configurations to make sure that all tunnels are up to date.
-            self?.reload()
+            self?.reload(){}
         }
     }
 
@@ -366,6 +429,7 @@ class TunnelsManager {
         let tunnelProviderManager = tunnel.tunnelProvider
         let isCurrentlyEnabled = (tunnelProviderManager.isOnDemandEnabled && tunnelProviderManager.isEnabled)
         guard isCurrentlyEnabled != isOnDemandEnabled else {
+            wg_log(.info, message: "Tunnel '\(tunnel.name)' on demand is already set to \(isOnDemandEnabled)")
             completionHandler(nil)
             return
         }
@@ -431,6 +495,7 @@ class TunnelsManager {
     func startActivation(of tunnel: TunnelContainer) {
         guard tunnels.contains(tunnel) else { return } // Ensure it's not deleted
         guard tunnel.status == .inactive else {
+            wg_log(.info, message: "Tunnel '\(tunnel.name)' waiting for deactivation'")
             activationDelegate?.tunnelActivationAttemptFailed(tunnel: tunnel, error: .tunnelIsNotInactive)
             return
         }
@@ -472,7 +537,11 @@ class TunnelsManager {
 
     func startDeactivation(of tunnel: TunnelContainer) {
         tunnel.isAttemptingActivation = false
-        guard tunnel.status != .inactive && tunnel.status != .deactivating else { return }
+        guard tunnel.status != .inactive && tunnel.status != .deactivating else {
+            wg_log(.info, staticMessage: "StartDeactivation: Tunnel is already inactive or deactivating. Report status and skip ...")
+            tunnel.refreshStatus()
+            return
+        }
         #if targetEnvironment(simulator)
         tunnel.status = .inactive
         #else
@@ -484,11 +553,16 @@ class TunnelsManager {
         tunnels.forEach { $0.refreshStatus() }
     }
 
-    private func activateWaitingTunnelOnDeactivation(of tunnel: TunnelContainer) {
+    private func activateWaitingTunnelOnDeactivation(of tunnel: TunnelContainer, waitOnSameTunnel: Bool = false) {
+        wg_log(.debug, staticMessage: "Waiting for tunnel to be inactive status")
         waiteeObservationToken = tunnel.observe(\.status) { [weak self] tunnel, _ in
+            wg_log(.debug, message: "Tunnel status is \(tunnel.status)")
             guard let self = self else { return }
             if tunnel.status == .inactive {
-                if let waitingTunnel = self.tunnels.first(where: { $0.status == .waiting }) {
+                wg_log(.debug, message: "Tunnel status is inactive checking waiting status")
+                if let waitingTunnel = waitOnSameTunnel ?
+                    tunnel : self.tunnels.first(where: { $0.status == .waiting }) {
+                    wg_log(.debug, message: "Tunnel start activation")
                     waitingTunnel.startActivation(activationDelegate: self.activationDelegate)
                 }
                 self.waiteeObservationToken = nil
@@ -498,6 +572,11 @@ class TunnelsManager {
 
     private func startObservingTunnelStatuses() {
         statusObservationToken = NotificationCenter.default.observe(name: .NEVPNStatusDidChange, object: nil, queue: OperationQueue.main) { [weak self] statusChangeNotification in
+            if let session = statusChangeNotification.object as? NETunnelProviderSession,
+               let tunnelProvider = session.manager as? NETunnelProviderManager
+            {
+                wg_log(.debug, message: "Tunnel connection status changed to '\(tunnelProvider.connection.status)'")
+            }
             guard let self = self,
                 let session = statusChangeNotification.object as? NETunnelProviderSession,
                 let tunnelProvider = session.manager as? NETunnelProviderManager,
@@ -533,6 +612,12 @@ class TunnelsManager {
         }
     }
 
+
+    static fileprivate var onStatusChange: ((String, String) -> Void)?
+    static func onTunnelStatusChange(handler: @escaping ((String, String) -> Void)) {
+        onStatusChange = handler
+    }
+
     func startObservingTunnelConfigurations() {
         configurationsObservationToken = NotificationCenter.default.observe(name: .NEVPNConfigurationChange, object: nil, queue: OperationQueue.main) { [weak self] _ in
             DispatchQueue.main.async { [weak self] in
@@ -540,13 +625,59 @@ class TunnelsManager {
                 // (reload() calls loadAllFromPreferences) is called after the completion handler of the saveToPreferences or
                 // removeFromPreferences call, if any, that caused this notification to fire. This notification can also fire
                 // as a result of a tunnel getting added or removed outside of the app.
-                self?.reload()
+                self?.reload(){}
             }
         }
     }
 
     static func tunnelNameIsLessThan(_ lhs: String, _ rhs: String) -> Bool {
         return lhs.compare(rhs, options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive, .numeric]) == .orderedAscending
+    }
+
+    var logViewHelperWg: LogViewHelper?
+    var isFetchingLogEntriesWg = false
+
+    func getWgLogs(completionHandler: @escaping ([String]) -> Void) {
+        logViewHelperWg = LogViewHelper(logFilePath: FileManager.logFileURL?.path)
+        guard !isFetchingLogEntriesWg else {
+            completionHandler([])
+            return
+        }
+        isFetchingLogEntriesWg = true
+        getWgLogFileLogs(logViewHelperWg) {ret in
+            self.isFetchingLogEntriesWg = false
+            print("getWgLogs: \(ret.count)")
+            completionHandler(ret)
+        }
+    }
+
+    private func getWgLogFileLogs(
+        _ logViewHelper: LogViewHelper?,
+        completionHandler: @escaping ([String]) -> Void
+    ) {
+        var ret: [String] = []
+        logViewHelper?.fetchLogEntriesSinceLastFetch { fetchedLogEntries in
+            defer {
+                wg_log(.debug, message: "returning the log entries, cnt=\(ret.count)")
+                completionHandler(ret)
+            }
+            guard !fetchedLogEntries.isEmpty else { return }
+            let max = 5000
+            wg_log(.debug, message: "debug log file lines: \(ret.count)")
+            let start = fetchedLogEntries.count > max ? fetchedLogEntries.count - max : 0
+            let logEntries = fetchedLogEntries[start...]
+            for logEntry in logEntries {
+                ret.append(logEntry.timestamp + ": " + logEntry.message)
+            }
+        }
+    }
+
+    func start(_ tunnelName: String) {
+        guard let tunnel = tunnel(named: tunnelName) else {
+            wg_log(.debug, message: "Tunnel '\(tunnelName)' invalid")
+            return
+        }
+        startActivation(of: tunnel)
     }
 }
 
@@ -611,6 +742,11 @@ class TunnelContainer: NSObject {
         return ActivateOnDemandOption(from: tunnelProvider)
     }
 
+    func applyOnDemandOption(option: ActivateOnDemandOption) {
+        wg_log(.info, message: "Tunnel '\(name)' apply on demand option: \(option)")
+        option.apply(on: tunnelProvider)
+    }
+
     #if os(macOS)
     var isTunnelAvailableToUser: Bool {
         return (tunnelProvider.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["UID"] as? uid_t == getuid()
@@ -646,9 +782,12 @@ class TunnelContainer: NSObject {
 
     func refreshStatus() {
         if (status == .restarting) || (status == .waiting && tunnelProvider.connection.status == .disconnected) {
+            wg_log(.info, message: "Tunnel '\(name)' is not yet active [\(status), \(tunnelProvider.connection.status)]. Skip sending the pending start login over.")
             return
         }
         status = TunnelStatus(from: tunnelProvider.connection.status)
+        wg_log(.debug, message: "Status callback = \(String(describing: TunnelsManager.onStatusChange))(\(status))")
+        TunnelsManager.onStatusChange?(name, "\(status)")
     }
 
     fileprivate func startActivation(recursionCount: UInt = 0, lastError: Error? = nil, activationDelegate: TunnelsManagerActivationDelegate?) {
@@ -687,7 +826,7 @@ class TunnelContainer: NSObject {
             let activationAttemptId = UUID().uuidString
             self.activationAttemptId = activationAttemptId
             try (tunnelProvider.connection as? NETunnelProviderSession)?.startTunnel(options: ["activationAttemptId": activationAttemptId])
-            wg_log(.debug, staticMessage: "startActivation: Success")
+            wg_log(.debug, message: "startActivation: Success. Connection=\(tunnelProvider.connection)")
             activationDelegate?.tunnelActivationAttemptSucceeded(tunnel: self)
         } catch let error {
             isAttemptingActivation = false
@@ -741,10 +880,69 @@ extension NETunnelProviderManager {
     func setTunnelConfiguration(_ tunnelConfiguration: TunnelConfiguration) {
         protocolConfiguration = NETunnelProviderProtocol(tunnelConfiguration: tunnelConfiguration, previouslyFrom: protocolConfiguration)
         localizedDescription = tunnelConfiguration.name
+        protocolConfiguration?.serverAddress = tunnelConfiguration.serverAddress
         objc_setAssociatedObject(self, &NETunnelProviderManager.cachedConfigKey, tunnelConfiguration, objc_AssociationPolicy.OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     func isEquivalentTo(_ tunnel: TunnelContainer) -> Bool {
         return localizedDescription == tunnel.name && tunnelConfiguration == tunnel.tunnelConfiguration
+    }
+}
+
+// MARK: - Cylonix extension
+extension TunnelsManager {
+    func sendCommand(_ tunnelName: String, _ cmd: String, _ args: String, completionHandler: @escaping (String) -> Void) {
+        guard let tunnel = tunnel(named: tunnelName) else {
+            completionHandler("tunnel \(tunnelName) does not exist")
+            return
+        }
+        tunnel.sendCommand(cmd, args, completionHandler: completionHandler)
+    }
+}
+
+
+extension TunnelContainer {
+    fileprivate func sendProviderMessage(_ messageData: Data, responseHandler: ((Data?) -> Void)? = nil) {
+        var errorMessage: String?
+        if let session = tunnelProvider.connection as? NETunnelProviderSession {
+            if session.status != .connected {
+                wg_log(.info, staticMessage: "Tunnel not yet connected or active. Ignore message sending")
+                errorMessage = "tunnel not yet connected or active"
+            }
+            do {
+                //wg_log(.debug, staticMessage: "send message to packet tunnel")
+                try session.sendProviderMessage(messageData, responseHandler: responseHandler)
+                //wg_log(.debug, staticMessage: "send message to packet tunnel succeeded")
+                return
+            } catch {
+                errorMessage = "send error: \(error)"
+            }
+        } else {
+           errorMessage = ": tunnel is not ready"
+        }
+        wg_log(.error, message: "failed to send message to packet tunnel \(String(describing: errorMessage))")
+        if let responseHandler = responseHandler {
+            responseHandler(nil)
+        }
+    }
+    fileprivate func sendCommand(_ cmd: String, _ args: String, completionHandler: @escaping (String) -> Void) {
+        //wg_log(.debug, message: "Tunnel: \(name) command: \(cmd) args: \(args)")
+        let dict = ["method": cmd, "arguments": args]
+        let encoder = JSONEncoder()
+        if let jsonData = try? encoder.encode(dict) {
+            sendProviderMessage(jsonData) { data in
+                if let data = data {
+                    if let status = String(data: data, encoding: .utf8) {
+                        completionHandler(status)
+                    } else {
+                        completionHandler("failed to convert response data to string")
+                    }
+                } else {
+                    completionHandler("received empty response data")
+                }
+            }
+            return
+        }
+        completionHandler("failed to encode json")
     }
 }

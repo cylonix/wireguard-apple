@@ -274,6 +274,9 @@
 "alertTunnelAlreadyExistsWithThatNameTitle" = "Name already exists";
 "alertTunnelAlreadyExistsWithThatNameMessage" = "A tunnel with that name already exists";
 
+"alertTunnelConfigurationNotAvailableTitle" = "Tunnel configuration not available";
+"alertTunnelConfigurationNotAvailableMessage" = "Failed to be added tunnel to the configuration";
+
 "alertTunnelActivationErrorTunnelIsNotInactiveTitle" = "Activation in progress";
 "alertTunnelActivationErrorTunnelIsNotInactiveMessage" = "The tunnel is already active or in the process of being activated";
 

@@ -7,26 +7,128 @@ import NetworkExtension
 
 #if SWIFT_PACKAGE
 import WireGuardKitC
+import CoreText
 #endif
 
 /// A type alias for `Result` type that holds a tuple with source and resolved endpoint.
 typealias EndpointResolutionResult = Result<(Endpoint, Endpoint), DNSResolutionError>
 
 class PacketTunnelSettingsGenerator {
-    let tunnelConfiguration: TunnelConfiguration
+    let tunnelConfiguration: TunnelConfiguration?
     let resolvedEndpoints: [Endpoint?]
+    let interfaceAddresses: [IPAddressRange]
+    let routes: [IPAddressRange]
+    let excludedRoutes: [IPAddressRange]
+    let dns: [String]
+    let dnsSearch: [String]?
 
     init(tunnelConfiguration: TunnelConfiguration, resolvedEndpoints: [Endpoint?]) {
         self.tunnelConfiguration = tunnelConfiguration
         self.resolvedEndpoints = resolvedEndpoints
+        self.interfaceAddresses = []
+        self.routes = []
+        self.excludedRoutes = []
+        self.dns = []
+        self.dnsSearch = []
+    }
+
+    init() {
+        self.tunnelConfiguration = nil
+        self.resolvedEndpoints = []
+        self.interfaceAddresses = []
+        self.routes = []
+        self.excludedRoutes = []
+        self.dnsSearch = []
+        self.dns = ["8.8.8.8", "8.8.4.4", "9.9.9.9", "223.5.5.5", "223.6.6.6", "114.114.114.114"]
+    }
+
+    init(addresses: [String]?, routes: [String]?, excludedRoutes: [String]?, dns: [String]?, dnsSearch: [String]?) {
+        self.dns = dns ??  ["8.8.8.8", "8.8.4.4", "9.9.9.9", "223.5.5.5", "223.6.6.6", "114.114.114.114"]
+        self.dnsSearch = dnsSearch
+        var interfaceAddresses: [IPAddressRange] = []
+        var tunnelRoutes: [IPAddressRange] = []
+        var tunnelExcludedRoutes: [IPAddressRange] = []
+        for a in addresses ?? [] {
+            guard let address = IPAddressRange(from: a) else {
+                wg_log(.error, message: "invalid address range: \(a)")
+                continue
+            }
+            interfaceAddresses.append(address)
+        }
+        for r in routes ?? [] {
+            guard let route = IPAddressRange(from: r) else {
+                wg_log(.error, message: "invalid route: \(r)")
+                continue
+            }
+            tunnelRoutes.append(route)
+        }
+        for r in excludedRoutes ?? [] {
+            guard let route = IPAddressRange(from: r) else {
+                wg_log(.error, message: "invalid excluded route: \(r)")
+                continue
+            }
+            tunnelExcludedRoutes.append(route)
+        }
+
+        self.interfaceAddresses = interfaceAddresses
+        self.routes = tunnelRoutes
+        self.excludedRoutes = tunnelExcludedRoutes
+        self.tunnelConfiguration = nil
+        self.resolvedEndpoints = []
+    }
+
+    private func getInterfaceAddresses() -> [IPAddressRange] {
+        if let tunnelConfig = tunnelConfiguration {
+            return tunnelConfig.interface.addresses
+        }
+        return interfaceAddresses
+    }
+
+    private func getRoutes() -> [IPAddressRange] {
+        if let tunnelConfig = tunnelConfiguration {
+            var ret: [IPAddressRange] = []
+            for peer in tunnelConfig.peers {
+                for addressRange in peer.allowedIPs {
+                    ret.append(addressRange)
+                }
+            }
+            return ret
+        }
+        return routes
+    }
+
+    private func getExcludedRoutes() -> [IPAddressRange] {
+        return excludedRoutes
+    }
+
+    private func getDNS() -> [String] {
+        if let tunnelConfig = tunnelConfiguration {
+             if !tunnelConfig.interface.dnsSearch.isEmpty ||
+                !tunnelConfig.interface.dns.isEmpty {
+                return tunnelConfig.interface.dns.map { $0.stringRepresentation }
+            }
+            return []
+        }
+        return dns
+    }
+
+    private func getDNSSearch() -> [String]? {
+        if let tunnelConfig = tunnelConfiguration {
+            return tunnelConfig.interface.dnsSearch
+        }
+        return dnsSearch
     }
 
     func endpointUapiConfiguration() -> (String, [EndpointResolutionResult?]) {
         var resolutionResults = [EndpointResolutionResult?]()
         var wgSettings = ""
 
+        guard let tunnelConfiguration = tunnelConfiguration else {
+            return ("", [])
+        }
+
         assert(tunnelConfiguration.peers.count == resolvedEndpoints.count)
-        for (peer, resolvedEndpoint) in zip(self.tunnelConfiguration.peers, self.resolvedEndpoints) {
+        for (peer, resolvedEndpoint) in zip(tunnelConfiguration.peers, self.resolvedEndpoints) {
             wgSettings.append("public_key=\(peer.publicKey.hexKey)\n")
 
             let result = resolvedEndpoint.map(Self.reresolveEndpoint)
@@ -43,6 +145,9 @@ class PacketTunnelSettingsGenerator {
     func uapiConfiguration() -> (String, [EndpointResolutionResult?]) {
         var resolutionResults = [EndpointResolutionResult?]()
         var wgSettings = ""
+        guard let tunnelConfiguration = tunnelConfiguration else {
+            return ("", [])
+        }
         wgSettings.append("private_key=\(tunnelConfiguration.interface.privateKey.hexKey)\n")
         if let listenPort = tunnelConfiguration.interface.listenPort {
             wgSettings.append("listen_port=\(listenPort)\n")
@@ -51,7 +156,7 @@ class PacketTunnelSettingsGenerator {
             wgSettings.append("replace_peers=true\n")
         }
         assert(tunnelConfiguration.peers.count == resolvedEndpoints.count)
-        for (peer, resolvedEndpoint) in zip(self.tunnelConfiguration.peers, self.resolvedEndpoints) {
+        for (peer, resolvedEndpoint) in zip(tunnelConfiguration.peers, self.resolvedEndpoints) {
             wgSettings.append("public_key=\(peer.publicKey.hexKey)\n")
             if let preSharedKey = peer.preSharedKey?.hexKey {
                 wgSettings.append("preshared_key=\(preSharedKey)\n")
@@ -83,17 +188,20 @@ class PacketTunnelSettingsGenerator {
          */
         let networkSettings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
 
-        if !tunnelConfiguration.interface.dnsSearch.isEmpty || !tunnelConfiguration.interface.dns.isEmpty {
-            let dnsServerStrings = tunnelConfiguration.interface.dns.map { $0.stringRepresentation }
+        var dnsServerStrings = getDNS()
+        if (dnsServerStrings.isEmpty) {
+            dnsServerStrings = ["8.8.8.8", "8.8.4.4", "9.9.9.9", "223.5.5.5", "223.6.6.6", "114.114.114.114"]
+        }
+        if !dnsServerStrings.isEmpty {
             let dnsSettings = NEDNSSettings(servers: dnsServerStrings)
-            dnsSettings.searchDomains = tunnelConfiguration.interface.dnsSearch
-            if !tunnelConfiguration.interface.dns.isEmpty {
+            dnsSettings.searchDomains = getDNSSearch()
+            if !dnsServerStrings.isEmpty {
                 dnsSettings.matchDomains = [""] // All DNS queries must first go through the tunnel's DNS
             }
             networkSettings.dnsSettings = dnsSettings
         }
 
-        let mtu = tunnelConfiguration.interface.mtu ?? 0
+        let mtu = tunnelConfiguration?.interface.mtu ?? 0
 
         /* 0 means automatic MTU. In theory, we should just do
          * `networkSettings.tunnelOverheadBytes = 80` but in
@@ -115,13 +223,16 @@ class PacketTunnelSettingsGenerator {
 
         let (ipv4Addresses, ipv6Addresses) = addresses()
         let (ipv4IncludedRoutes, ipv6IncludedRoutes) = includedRoutes()
+        let (ipv4ExcludedRoutes, ipv6ExcludedRoutes) = generateExcludedRoutes()
 
         let ipv4Settings = NEIPv4Settings(addresses: ipv4Addresses.map { $0.destinationAddress }, subnetMasks: ipv4Addresses.map { $0.destinationSubnetMask })
         ipv4Settings.includedRoutes = ipv4IncludedRoutes
+        ipv4Settings.excludedRoutes = ipv4ExcludedRoutes
         networkSettings.ipv4Settings = ipv4Settings
 
         let ipv6Settings = NEIPv6Settings(addresses: ipv6Addresses.map { $0.destinationAddress }, networkPrefixLengths: ipv6Addresses.map { $0.destinationNetworkPrefixLength })
         ipv6Settings.includedRoutes = ipv6IncludedRoutes
+        ipv6Settings.excludedRoutes = ipv6ExcludedRoutes
         networkSettings.ipv6Settings = ipv6Settings
 
         return networkSettings
@@ -130,7 +241,7 @@ class PacketTunnelSettingsGenerator {
     private func addresses() -> ([NEIPv4Route], [NEIPv6Route]) {
         var ipv4Routes = [NEIPv4Route]()
         var ipv6Routes = [NEIPv6Route]()
-        for addressRange in tunnelConfiguration.interface.addresses {
+        for addressRange in getInterfaceAddresses() {
             if addressRange.address is IPv4Address {
                 ipv4Routes.append(NEIPv4Route(destinationAddress: "\(addressRange.address)", subnetMask: "\(addressRange.subnetMask())"))
             } else if addressRange.address is IPv6Address {
@@ -149,7 +260,8 @@ class PacketTunnelSettingsGenerator {
         var ipv4IncludedRoutes = [NEIPv4Route]()
         var ipv6IncludedRoutes = [NEIPv6Route]()
 
-        for addressRange in tunnelConfiguration.interface.addresses {
+        // TODO: (randy) check if we need to make sure these does not overlap with excluded rotues
+        for addressRange in getInterfaceAddresses() {
             if addressRange.address is IPv4Address {
                 let route = NEIPv4Route(destinationAddress: "\(addressRange.maskedAddress())", subnetMask: "\(addressRange.subnetMask())")
                 route.gatewayAddress = "\(addressRange.address)"
@@ -161,16 +273,40 @@ class PacketTunnelSettingsGenerator {
             }
         }
 
-        for peer in tunnelConfiguration.peers {
-            for addressRange in peer.allowedIPs {
-                if addressRange.address is IPv4Address {
-                    ipv4IncludedRoutes.append(NEIPv4Route(destinationAddress: "\(addressRange.address)", subnetMask: "\(addressRange.subnetMask())"))
-                } else if addressRange.address is IPv6Address {
-                    ipv6IncludedRoutes.append(NEIPv6Route(destinationAddress: "\(addressRange.address)", networkPrefixLength: NSNumber(value: addressRange.networkPrefixLength)))
-                }
+        for addressRange in getRoutes() {
+            if addressRange.address is IPv4Address {
+                ipv4IncludedRoutes.append(NEIPv4Route(
+                    destinationAddress: "\(addressRange.address)",
+                    subnetMask: "\(addressRange.subnetMask())")
+                )
+            } else if addressRange.address is IPv6Address {
+                ipv6IncludedRoutes.append(NEIPv6Route(
+                    destinationAddress: "\(addressRange.address)",
+                    networkPrefixLength: NSNumber(value: addressRange.networkPrefixLength))
+                )
             }
         }
         return (ipv4IncludedRoutes, ipv6IncludedRoutes)
+    }
+
+    private func generateExcludedRoutes() -> ([NEIPv4Route], [NEIPv6Route]) {
+        var ipv4ExcludedRoutes = [NEIPv4Route]()
+        var ipv6ExcludedRoutes = [NEIPv6Route]()
+
+        for addressRange in getExcludedRoutes() {
+            if addressRange.address is IPv4Address {
+                ipv4ExcludedRoutes.append(NEIPv4Route(
+                    destinationAddress: "\(addressRange.address)",
+                    subnetMask: "\(addressRange.subnetMask())")
+                )
+            } else if addressRange.address is IPv6Address {
+                ipv6ExcludedRoutes.append(NEIPv6Route(
+                    destinationAddress: "\(addressRange.address)",
+                    networkPrefixLength: NSNumber(value: addressRange.networkPrefixLength))
+                )
+            }
+        }
+        return (ipv4ExcludedRoutes, ipv6ExcludedRoutes)
     }
 
     private class func reresolveEndpoint(endpoint: Endpoint) -> EndpointResolutionResult {

@@ -25,8 +25,16 @@ build: $(DESTDIR)/libwg-go.a
 version-header: $(DESTDIR)/wireguard-go-version.h
 
 REAL_GOROOT := $(shell go env GOROOT 2>/dev/null)
+# Xcode does not pass user shell $PATH setting.
+ifeq ($(REAL_GOROOT),)
+	REAL_GOROOT=/usr/local/go
+	REAL_GOROOT_HARD_SET=yes
+	PATH += :/usr/local/go/bin
+endif
 export GOROOT := $(BUILDDIR)/goroot
 $(GOROOT)/.prepared:
+	@echo "PATH=${PATH}"
+	@echo "REAL_GOROOT=${REAL_GOROOT} REAL_GOROOT_HARD_SET=${REAL_GOROOT_HARD_SET}"
 	[ -n "$(REAL_GOROOT)" ]
 	mkdir -p "$(GOROOT)"
 	rsync -a --delete --exclude=pkg/obj/go-build "$(REAL_GOROOT)/" "$(GOROOT)/"
@@ -40,7 +48,8 @@ $(BUILDDIR)/libwg-go-$(1).a: export CGO_LDFLAGS := $(CFLAGS_PREFIX) $(ARCH)
 $(BUILDDIR)/libwg-go-$(1).a: export GOOS := $(GOOS_$(PLATFORM_NAME))
 $(BUILDDIR)/libwg-go-$(1).a: export GOARCH := $(GOARCH_$(1))
 $(BUILDDIR)/libwg-go-$(1).a: $(GOROOT)/.prepared go.mod
-	go build -ldflags=-w -trimpath -v -o "$(BUILDDIR)/libwg-go-$(1).a" -buildmode c-archive
+	go build -gcflags '-N' -trimpath -v -o "$(BUILDDIR)/libwg-go-$(1).a" -buildmode c-archive -tags ts_macext
+	echo "build ligwg-go at $(BUILDDIR)"
 	rm -f "$(BUILDDIR)/libwg-go-$(1).h"
 endef
 $(foreach ARCH,$(ARCHS),$(eval $(call libwg-go-a,$(ARCH))))

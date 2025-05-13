@@ -54,12 +54,30 @@ public class Logger {
     }
 }
 
+func os_log_type_string(_ type: OSLogType) -> String {
+    switch type {
+    case .default:
+        return "DEFAULT"
+    case .info:
+        return "INFO"
+    case .debug:
+        return "DEBUG"
+    case .error:
+        return "ERROR"
+    case .fault:
+        return "FAULT"
+    default:
+        return "TRACE"
+    }
+}
+
 func wg_log(_ type: OSLogType, staticMessage msg: StaticString) {
-    os_log(msg, log: OSLog.default, type: type)
-    Logger.global?.log(message: "\(msg)")
+    os_log(msg, log: OSLog.default, type: .error)
+    Logger.global?.log(message: "[\(os_log_type_string(type))] \(msg)")
 }
 
 func wg_log(_ type: OSLogType, message msg: String) {
-    os_log("%{public}s", log: OSLog.default, type: type, msg)
-    Logger.global?.log(message: msg)
+    os_log("%{public}s", log: OSLog.default, type: .error, msg)
+    //os_log(msg, log: OSLog.default, type: .error)
+    Logger.global?.log(message: "[\(os_log_type_string(type))] \(msg)")
 }

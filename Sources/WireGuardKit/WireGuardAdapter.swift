@@ -3,10 +3,12 @@
 
 import Foundation
 import NetworkExtension
+import UserNotifications
 
 #if SWIFT_PACKAGE
 import WireGuardKitGo
 import WireGuardKitC
+import CoreText
 #endif
 
 public enum WireGuardAdapterError: Error {
@@ -38,6 +40,15 @@ private enum State {
     case temporaryShutdown(_ settingsGenerator: PacketTunnelSettingsGenerator)
 }
 
+struct WireGuardNetworkSettingsConfig: Codable {
+    var mtu: Int?
+    var addresses: [String]?
+    var routes: [String]?
+    var excludedRoutes: [String]?
+    var dnsServers: [String]?
+    var searchDomains: [String]?
+}
+
 public class WireGuardAdapter {
     public typealias LogHandler = (WireGuardLogLevel, String) -> Void
 
@@ -55,6 +66,9 @@ public class WireGuardAdapter {
 
     /// Adapter state.
     private var state: State = .stopped
+
+    /// Last network settings generator.
+    private var lastNetworkSettingsGenerator: PacketTunnelSettingsGenerator?
 
     /// Tunnel device file descriptor.
     private var tunnelFileDescriptor: Int32? {
@@ -133,7 +147,8 @@ public class WireGuardAdapter {
         self.packetTunnelProvider = packetTunnelProvider
         self.logHandler = logHandler
 
-        setupLogHandler()
+        self.setupLogHandler()
+        self.cylonixInit() // __CYLONIX_MOD__
     }
 
     deinit {
@@ -189,7 +204,13 @@ public class WireGuardAdapter {
 
             do {
                 let settingsGenerator = try self.makeSettingsGenerator(with: tunnelConfiguration)
-                try self.setNetworkSettings(settingsGenerator.generateNetworkSettings())
+                if let generator = self.lastNetworkSettingsGenerator {
+                    wg_log(.info, staticMessage: "Start: re-apply cached network setting.")
+                    try self.setNetworkSettings(generator.generateNetworkSettings())
+                } else {
+                    wg_log(.info, staticMessage: "Start: no cached network setting. Use default generator.")
+                    try self.setNetworkSettings(PacketTunnelSettingsGenerator().generateNetworkSettings())
+                }
 
                 let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
                 self.logEndpointResolutionResults(resolutionResults)
@@ -249,13 +270,20 @@ public class WireGuardAdapter {
             // configuration.
             // This will broadcast the `NEVPNStatusDidChange` notification to the GUI process.
             self.packetTunnelProvider?.reasserting = true
+            wg_log(.info, staticMessage: "update wg tunnel, setting tunnel reasserting status")
             defer {
                 self.packetTunnelProvider?.reasserting = false
             }
 
             do {
                 let settingsGenerator = try self.makeSettingsGenerator(with: tunnelConfiguration)
-                try self.setNetworkSettings(settingsGenerator.generateNetworkSettings())
+                 if let generator = self.lastNetworkSettingsGenerator {
+                    wg_log(.info, staticMessage: "Update: re-apply cached network setting.")
+                    try self.setNetworkSettings(generator.generateNetworkSettings())
+                } else {
+                    wg_log(.info, staticMessage: "Update: no cached network setting. Use default generator.")
+                    try self.setNetworkSettings(PacketTunnelSettingsGenerator().generateNetworkSettings())
+                }
 
                 switch self.state {
                 case .started(let handle, _):
@@ -289,17 +317,19 @@ public class WireGuardAdapter {
 
     /// Setup WireGuard log handler.
     private func setupLogHandler() {
+        wg_log(.info, staticMessage: "setting up wg log handler")
         let context = Unmanaged.passUnretained(self).toOpaque()
         wgSetLogger(context) { context, logLevel, message in
             guard let context = context, let message = message else { return }
+            autoreleasepool {
+                let unretainedSelf = Unmanaged<WireGuardAdapter>.fromOpaque(context)
+                    .takeUnretainedValue()
 
-            let unretainedSelf = Unmanaged<WireGuardAdapter>.fromOpaque(context)
-                .takeUnretainedValue()
+                let swiftString = String(cString: message).trimmingCharacters(in: .newlines)
+                let tunnelLogLevel = WireGuardLogLevel(rawValue: logLevel) ?? .verbose
 
-            let swiftString = String(cString: message).trimmingCharacters(in: .newlines)
-            let tunnelLogLevel = WireGuardLogLevel(rawValue: logLevel) ?? .verbose
-
-            unretainedSelf.logHandler(tunnelLogLevel, swiftString)
+                unretainedSelf.logHandler(tunnelLogLevel, swiftString)
+            }
         }
     }
 
@@ -312,6 +342,14 @@ public class WireGuardAdapter {
     /// - Throws: an error of type `WireGuardAdapterError`.
     /// - Returns: `PacketTunnelSettingsGenerator`.
     private func setNetworkSettings(_ networkSettings: NEPacketTunnelNetworkSettings) throws {
+        logHandler(.verbose, """
+            Setting tunnel network settings:
+            - DNS Servers: \(networkSettings.dnsSettings?.servers ?? [])
+            - Search Domains: \(networkSettings.dnsSettings?.searchDomains ?? [])
+            - MTU: \(networkSettings.mtu ?? 0)
+            - IPv4: \(networkSettings.ipv4Settings?.debugDescription ?? "nil")
+            - IPv6: \(networkSettings.ipv6Settings?.debugDescription ?? "nil")
+            """)
         var systemError: Error?
         let condition = NSCondition()
 
@@ -319,7 +357,8 @@ public class WireGuardAdapter {
         condition.lock()
         defer { condition.unlock() }
 
-        self.packetTunnelProvider?.setTunnelNetworkSettings(networkSettings) { error in
+        packetTunnelProvider?.setTunnelNetworkSettings(networkSettings) { error in
+            self.logHandler(.verbose, "setTunnelNetworkSettings callback, error: \(String(describing: error))")
             systemError = error
             condition.signal()
         }
@@ -414,7 +453,7 @@ public class WireGuardAdapter {
     /// Helper method used by network path monitor.
     /// - Parameter path: new network path
     private func didReceivePathUpdate(path: Network.NWPath) {
-        self.logHandler(.verbose, "Network change detected with \(path.status) route and interface order \(path.availableInterfaces)")
+        self.logHandler(.verbose, "Network change detected with \(path.status) route and interface order \(path.availableInterfaces): \(path.unsatisfiedReason) \(path.debugDescription)")
 
         #if os(macOS)
         if case .started(let handle, _) = self.state {
@@ -427,6 +466,7 @@ public class WireGuardAdapter {
                 let (wgConfig, resolutionResults) = settingsGenerator.endpointUapiConfiguration()
                 self.logEndpointResolutionResults(resolutionResults)
 
+                self.logHandler(.verbose, "Connectivity is good, set config and bump the sockets")
                 wgSetConfig(handle, wgConfig)
                 wgDisableSomeRoamingForBrokenMobileSemantics(handle)
                 wgBumpSockets(handle)
@@ -441,9 +481,14 @@ public class WireGuardAdapter {
             guard path.status.isSatisfiable else { return }
 
             self.logHandler(.verbose, "Connectivity online, resuming backend.")
-
             do {
-                try self.setNetworkSettings(settingsGenerator.generateNetworkSettings())
+                if let generator = self.lastNetworkSettingsGenerator {
+                    wg_log(.info, staticMessage: "Connectivity online: re-apply cached network setting.")
+                    try self.setNetworkSettings(generator.generateNetworkSettings())
+                } else {
+                    wg_log(.info, staticMessage: "Connectivity online: no cached network setting. Use default generator.")
+                    try self.setNetworkSettings(PacketTunnelSettingsGenerator().generateNetworkSettings())
+                }
 
                 let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
                 self.logEndpointResolutionResults(resolutionResults)
@@ -453,7 +498,8 @@ public class WireGuardAdapter {
                     settingsGenerator
                 )
             } catch {
-                self.logHandler(.error, "Failed to restart backend: \(error.localizedDescription)")
+                self.logHandler(.error, "Restart failed: \(error.localizedDescription). Hard resetting")
+                self.packetTunnelProvider?.cancelTunnelWithError(error)
             }
 
         case .stopped:
@@ -484,4 +530,380 @@ private extension Network.NWPath.Status {
             return true
         }
     }
+}
+
+/// Mark -- Cylonix extension
+extension WireGuardAdapter {
+    private func cylonixInit() {
+        setupCylonixHandler()
+        checkUserNotificationPermission()
+        setupDarwinNotificationMessageObserver()
+    }
+
+    /// Set up cylonix handlers
+    private func setupCylonixHandler() {
+        wg_log(.info, message: "Setting up cylonix handlers")
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        wgSetAdapter(FileManager.sharedFolderURL?.path, context) { context, method, args, buf, len in
+            wg_log(.debug, message: "Cylonix adapter call received")
+            guard let context = context, let buf = buf, len > 128 else {
+                wg_log(.error, message: "bad buf or len")
+                return
+            }
+            autoreleasepool {
+                let unretainedSelf = Unmanaged<WireGuardAdapter>.fromOpaque(context)
+                    .takeUnretainedValue()
+                guard let method = method, let args = args else {
+                    strlcpy(buf, "ERROR: invalid input", Int(len))
+                    return
+                }
+                let cmd = String(cString: method)
+                let arguments = String(cString: args)
+                var ret = "ERROR: unknown"
+                wg_log(.debug, message: "Cylonix adapter call received \(cmd)")
+                switch cmd {
+                case "setKeychainItem":
+                    // Value is base64 encoded so there should be no space in the value
+                    let parts = arguments.split(separator: " ", maxSplits: 1)
+                    if parts.count == 2 {
+                        let k = String(parts[0])
+                        let v = String(parts[1])
+                        ret = Keychain.setItem(key: k, value: v)
+                    } else {
+                        ret = "ERROR: invalid key/value arguments"
+                    }
+                case "getKeychainItem":
+                    ret = Keychain.getItem(key: arguments)
+                case "setNetworkSettings":
+                    ret = unretainedSelf.setNetworkSettingsWithJsonString(arguments)
+                case "ipnNotify":
+                    ret = unretainedSelf.handleIpnNotify(arguments)
+                case "chatsReceived":
+                    ret = unretainedSelf.handleChatsReceived(arguments)
+                case "filesWaiting":
+                    ret = unretainedSelf.handleFilesWaiting(arguments)
+                default:
+                    ret = "ERROR: method \(cmd) not supported"
+                }
+                strlcpy(buf, ret, Int(len))
+            }
+        }
+    }
+
+    /// Set network tunnel configuration with config json string
+    private func setNetworkSettingsWithJsonString(_ jsonString: String) -> String {
+        wg_log(.info, message: "set network settings \(jsonString)")
+        do {
+            let json = jsonString.data(using: .utf8)!
+            let decoder = JSONDecoder()
+            let config = try decoder.decode(WireGuardNetworkSettingsConfig.self, from: json)
+            let generator = PacketTunnelSettingsGenerator(
+                addresses: config.addresses,
+                routes: config.routes,
+                excludedRoutes: config.excludedRoutes,
+                dns: config.dnsServers,
+                dnsSearch: config.searchDomains
+            )
+            logHandler(.verbose, "setNetworkSettingsWithJsonString: set last generator to \(generator) with config \(config) jsonString \(jsonString)")
+            lastNetworkSettingsGenerator = generator
+            try setNetworkSettings(generator.generateNetworkSettings())
+            return ""
+        } catch {
+            wg_log(.error, message: "network settings error: \(error)")
+            return "ERROR: network settings error: \(error)"
+        }
+    }
+
+    private func sharedDefaults() -> UserDefaults? {
+        guard let appGroupId = FileManager.appGroupId else {
+            wg_log(.error, message: "Cannot obtain app group ID")
+            return nil
+        }
+        return UserDefaults(suiteName: appGroupId)
+    }
+
+    private func handleIpnNotify(_ notification: String) -> String {
+        let notificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
+        let notificationName = PacketTunnelNotification.ipnNotify as CFString
+        guard let containerURL = containerURL() else {
+            wg_log(.error, message: "Failed to get group container URL")
+            return "ERROR: Failed to get group container URL"
+        }
+        let fileManager = FileManager.default
+
+        do {
+            try fileManager.createDirectory(at: containerURL, withIntermediateDirectories: true)
+        } catch {
+            wg_log(.error, message: "Failed to create directory '\(containerURL)': \(error.localizedDescription)")
+            return "ERROR: Failed to create directory '\(containerURL)': \(error.localizedDescription)"
+        }
+
+        // Use file coordination for atomic access
+        let coordinator = NSFileCoordinator()
+        var coorError: NSError?
+
+        coordinator.coordinate(writingItemAt: containerURL, options: .forMerging, error: &coorError) { url in
+            // Get queue with file protection
+            let queueFile = url.appendingPathComponent("notification_queue.json")
+            var queue: [[String: Any]] = []
+
+            if let data = try? Data(contentsOf: queueFile) {
+                queue = (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+            }
+
+            // Add new notification
+            let entry: [String: Any] = [
+                "id": UUID().uuidString,
+                "timestamp": floor(Date().timeIntervalSince1970 * 1_000_000), // microseconds
+                "notification": notification,
+            ]
+            queue.append(entry)
+
+            // Keep last 100 items
+            if queue.count > 100 {
+                queue.removeFirst(queue.count - 100)
+            }
+
+            // Write atomically
+            if let data = try? JSONSerialization.data(withJSONObject: queue) {
+                try? data.write(to: queueFile, options: .atomicWrite)
+            }
+            wg_log(.info, message: "Notification queue updated with \(notification)")
+        }
+        if let error = coorError {
+            wg_log(.error, message: "Failed to access notification queue: \(error.localizedDescription)")
+            return "ERROR: Failed to access notification queue: \(error.localizedDescription)"
+        }
+
+        wg_log(.info, message: "Notification queue updated with \(notification)")
+        CFNotificationCenterPostNotification(notificationCenter, CFNotificationName(notificationName), nil, nil, true)
+        return ""
+    }
+
+    private func postNotification(notification: String) {
+        // Post Darwin notification that can be received by both main app and extension
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFNotificationName(notification as CFString),
+                                             nil,
+                                             nil,
+                                             true)
+        wg_log(.info, message: "Posted notification: \(notification)")
+    }
+
+    private func handleFilesWaiting(_ filesWaitingDetails: String) -> String{
+        guard let defaults = sharedDefaults() else {
+            wg_log(.error, message: "Failed to access shared defaults")
+            return "ERROR: Failed to access shared defaults"
+        }
+        if let currentFilesWaiting = defaults.string(forKey: PacketTunnelUserDefaultsKey.filesWaiting) {
+            if currentFilesWaiting == filesWaitingDetails {
+                wg_log(.info, message: "Received file details the same as pending for processing. Ignoring.")
+                return ""
+            }
+        }
+        defaults.set(filesWaitingDetails, forKey: PacketTunnelUserDefaultsKey.filesWaiting)
+        defaults.synchronize()
+        // Parse file details and show notification
+        do {
+            wg_log(.info, message: "Received file details: \(filesWaitingDetails)")
+            if let json = try JSONSerialization.jsonObject(with: Data(filesWaitingDetails.utf8)) as? [String: Any],
+               let files = json["Files"] as? [[String: Any]]
+            {
+                let fileCount = files.count
+                let title = "Files Received"
+                let body = fileCount == 1
+                    ? "You received a new file"
+                    : "You received \(fileCount) new files"
+
+                wg_log(.info, message: "Sending User notification of Received \(fileCount) files")
+                sendUserNotification(
+                    title: title,
+                    body: body,
+                    identifier: "file-receipt-\(UUID().uuidString)"
+                )
+            }
+        } catch {
+            wg_log(.error, message: "Failed to parse files waiting details: \(error)")
+            return "ERROR: Failed to parse files waiting details: \(error)"
+        }
+        wg_log(.info, message: "Files waiting details: \(filesWaitingDetails) get result: \(defaults.string(forKey: "FilesWaiting") ?? "nil")")
+        // wg_log(.info, message: "Files waiting details: \(filesWaitingDetails)")
+        postNotification(notification: PacketTunnelNotification.filesWaiting)
+        return ""
+    }
+
+    private func handleChatsReceived(_ chatsReceived: String) -> String {
+        guard let defaults = sharedDefaults() else {
+            wg_log(.error, message: "Failed to access shared defaults")
+            return "ERROR: Failed to access shared defaults"
+        }
+        defaults.set(chatsReceived, forKey: PacketTunnelUserDefaultsKey.chatsReceived)
+        defaults.synchronize()
+        postNotification(notification: PacketTunnelNotification.chatsReceived)
+        return ""
+    }
+
+    private func sendUserNotification(title: String, body: String, identifier: String? = nil) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        // Add threadIdentifier to group related notifications
+        content.threadIdentifier = PacketTunnelNotification.userNotification
+
+        // Create unique identifier if none provided
+        let notificationId = identifier ?? UUID().uuidString
+
+        // Create request with content
+        let request = UNNotificationRequest(
+            identifier: notificationId,
+            content: content,
+            trigger: nil // Deliver immediately
+        )
+        wg_log(.info, message: "Scheduling notification with id: \(notificationId)")
+
+        // Schedule notification
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                wg_log(.error, message: "Failed to schedule notification: \(error.localizedDescription)")
+            } else {
+                wg_log(.info, message: "Successfully scheduled notification with id: \(notificationId)")
+            }
+        }
+    }
+
+    fileprivate func handleDarwinNotification(_ cfName: CFNotificationName?) {
+        guard
+            let raw = cfName?.rawValue as String?,
+            raw.hasPrefix(PacketTunnelMessage.prefix),
+            !raw.hasSuffix(".response")
+        else {
+            wg_log(.error, message: "handleDarwinNotification: Invalid notification name \(String(describing: cfName))")
+            return
+        }
+        let name = raw
+
+        wg_log(.info, message: "handleDarwinNotification: Received notification \(name)")
+        guard let group = containerURL() else {
+            wg_log(.error, message: "handleDarwinNotification: Failed to get group container URL")
+            return
+        }
+        let msgURL = group.appendingPathComponent(PacketTunnelMessage.messageFile(channel: name))
+        let respURL = group.appendingPathComponent(PacketTunnelMessage.responseFile(channel: name))
+
+        guard
+            let data = try? Data(contentsOf: msgURL),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let id = json["id"] as? String,
+            let method = json["method"] as? String
+        else {
+            wg_log(.error, message: "handleDarwinNotification: Malformed message for channel \(name)")
+            return
+        }
+
+        // forward via wgSendCommand
+        wg_log(.info, message: "handleDarwinNotification: command '\(method)'")
+        let args = json["arguments"] as? String ?? ""
+        var resultString = "no-response"
+        if let cstr = wgSendCommand(method, args) {
+            resultString = String(cString: cstr); free(cstr)
+            wg_log(.debug, message: "handleDarwinNotification: command '\(method)' response: \(String(resultString.prefix(200)))")
+        } else {
+            wg_log(.error, message: "handleDarwinNotification: Failed to send command '\(method)'")
+        }
+
+        // write response JSON + notify
+        let respObj: [String: Any] = ["id": id, "payload": resultString]
+        if let out = try? JSONSerialization.data(withJSONObject: respObj) {
+            try? out.write(to: respURL, options: .atomic)
+            CFNotificationCenterPostNotification(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                CFNotificationName((name + ".response") as CFString),
+                nil, nil, true
+            )
+            wg_log(.info, message: "handleDarwinNotification: Response written to \(respURL.lastPathComponent)")
+        }
+        wg_log(.info, message: "handleDarwinNotification: Completed handling notification \(name)")
+    }
+
+    private func checkUserNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if let error = error {
+                wg_log(.error, message: "Failed to request notification authorization: \(error.localizedDescription)")
+                return
+            }
+            if granted {
+                wg_log(.info, message: "Notification authorization granted")
+            } else {
+                wg_log(.error, message: "Notification authorization denied")
+            }
+        }
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            wg_log(.info, message: "Notification settings: authorization status = \(settings.authorizationStatus.rawValue)")
+
+            if settings.authorizationStatus == .notDetermined {
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                    if let error = error {
+                        wg_log(.error, message: "Failed to request notification authorization: \(error.localizedDescription)")
+                        return
+                    }
+                    wg_log(.info, message: "Notification authorization \(granted ? "granted" : "denied")")
+                }
+            } else if settings.authorizationStatus == .denied {
+                wg_log(.error, message: "Notifications are disabled in system settings")
+            }
+        }
+    }
+
+    private func setupDarwinNotificationMessageObserver() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        // explicitly listen for the "share" channel
+        let shareNote = PacketTunnelMessage.share as CFString
+        CFNotificationCenterAddObserver(
+            center,
+            Unmanaged.passUnretained(self).toOpaque(),
+            packetTunnelDarwinCallback,
+            shareNote,
+            nil,
+            .deliverImmediately
+        )
+        wg_log(.info, message: "Listening for Darwin notification: \(shareNote)")
+
+        // if you have other channels, add them here:
+        let tailchatNote = PacketTunnelMessage.tailchat as CFString
+        CFNotificationCenterAddObserver(
+            center,
+            Unmanaged.passUnretained(self).toOpaque(),
+            packetTunnelDarwinCallback,
+            tailchatNote,
+            nil,
+            .deliverImmediately
+        )
+        wg_log(.info, message: "Listening for Darwin notification: \(tailchatNote)")
+    }
+
+    private func containerURL() -> URL? {
+        return FileManager.sharedFolderURL
+    }
+}
+
+private func packetTunnelDarwinCallback(
+    _: CFNotificationCenter?,
+    _ observerRaw: UnsafeMutableRawPointer?,
+    _ cfName: CFNotificationName?,
+    _: UnsafeRawPointer?,
+    _: CFDictionary?
+) {
+    guard
+        let observerRaw = observerRaw
+    else {
+        wg_log(.error, message: "⚠️ packetTunnelDarwinCallback: missing observer")
+        return
+    }
+    let adapter = Unmanaged<WireGuardAdapter>
+        .fromOpaque(observerRaw)
+        .takeUnretainedValue()
+    wg_log(.info, message: "packetTunnelDarwinCallback: Darwin notification received: \(String(describing: cfName))")
+    adapter.handleDarwinNotification(cfName)
 }

@@ -30,3 +30,13 @@ extension InterfaceConfiguration: Equatable {
             lhs.dnsSearch == rhs.dnsSearch
     }
 }
+
+
+// __BEGIN_CYLONIX_MOD__
+extension InterfaceConfiguration: CustomStringConvertible {
+    public var description: String {
+        return "<\(type(of: self)): [\(privateKey.publicKey.hexKey[...String.Index(encodedOffset: 5)])]"
+    }
+}
+
+// __END_CYLONIX_MOD__

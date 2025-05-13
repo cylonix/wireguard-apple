@@ -15,7 +15,7 @@ extension FileManager {
         #endif
         return Bundle.main.object(forInfoDictionaryKey: appGroupIdInfoDictionaryKey) as? String
     }
-    private static var sharedFolderURL: URL? {
+    static var sharedFolderURL: URL? {
         guard let appGroupId = FileManager.appGroupId else {
             os_log("Cannot obtain app group ID from bundle", log: OSLog.default, type: .error)
             return nil
