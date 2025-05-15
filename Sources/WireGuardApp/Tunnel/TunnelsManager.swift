@@ -634,51 +634,8 @@ class TunnelsManager {
         return lhs.compare(rhs, options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive, .numeric]) == .orderedAscending
     }
 
-    var logViewHelperWg: LogViewHelper?
-    var isFetchingLogEntriesWg = false
-
-    func getWgLogs(completionHandler: @escaping ([String]) -> Void) {
-        logViewHelperWg = LogViewHelper(logFilePath: FileManager.logFileURL?.path)
-        guard !isFetchingLogEntriesWg else {
-            completionHandler([])
-            return
-        }
-        isFetchingLogEntriesWg = true
-        getWgLogFileLogs(logViewHelperWg) {ret in
-            self.isFetchingLogEntriesWg = false
-            print("getWgLogs: \(ret.count)")
-            completionHandler(ret)
-        }
-    }
-
-    private func getWgLogFileLogs(
-        _ logViewHelper: LogViewHelper?,
-        completionHandler: @escaping ([String]) -> Void
-    ) {
-        var ret: [String] = []
-        logViewHelper?.fetchLogEntriesSinceLastFetch { fetchedLogEntries in
-            defer {
-                wg_log(.debug, message: "returning the log entries, cnt=\(ret.count)")
-                completionHandler(ret)
-            }
-            guard !fetchedLogEntries.isEmpty else { return }
-            let max = 5000
-            wg_log(.debug, message: "debug log file lines: \(ret.count)")
-            let start = fetchedLogEntries.count > max ? fetchedLogEntries.count - max : 0
-            let logEntries = fetchedLogEntries[start...]
-            for logEntry in logEntries {
-                ret.append(logEntry.timestamp + ": " + logEntry.message)
-            }
-        }
-    }
-
-    func start(_ tunnelName: String) {
-        guard let tunnel = tunnel(named: tunnelName) else {
-            wg_log(.debug, message: "Tunnel '\(tunnelName)' invalid")
-            return
-        }
-        startActivation(of: tunnel)
-    }
+    var logViewHelper: LogViewHelper?
+    var isFetchingLogEntries = false
 }
 
 private func lastErrorTextFromNetworkExtension(for tunnel: TunnelContainer) -> (title: String, message: String)? {
@@ -890,6 +847,19 @@ extension NETunnelProviderManager {
 }
 
 // MARK: - Cylonix extension
+
+private func debugLog(_ message: String) {
+    wg_log(.debug, message: "[TunnelManager]: \(message)")
+}
+
+private func errorLog(_ message: String) {
+    wg_log(.error, message: "[TunnelManager]: \(message)")
+}
+
+private func infoLog(_ message: String) {
+    wg_log(.info, message: "[TunnelManager]: \(message)")
+}
+
 extension TunnelsManager {
     func sendCommand(_ tunnelName: String, _ cmd: String, _ args: String, completionHandler: @escaping (String) -> Void) {
         guard let tunnel = tunnel(named: tunnelName) else {
@@ -898,51 +868,89 @@ extension TunnelsManager {
         }
         tunnel.sendCommand(cmd, args, completionHandler: completionHandler)
     }
-}
 
-
-extension TunnelContainer {
-    fileprivate func sendProviderMessage(_ messageData: Data, responseHandler: ((Data?) -> Void)? = nil) {
-        var errorMessage: String?
-        if let session = tunnelProvider.connection as? NETunnelProviderSession {
-            if session.status != .connected {
-                wg_log(.info, staticMessage: "Tunnel not yet connected or active. Ignore message sending")
-                errorMessage = "tunnel not yet connected or active"
-            }
-            do {
-                //wg_log(.debug, staticMessage: "send message to packet tunnel")
-                try session.sendProviderMessage(messageData, responseHandler: responseHandler)
-                //wg_log(.debug, staticMessage: "send message to packet tunnel succeeded")
-                return
-            } catch {
-                errorMessage = "send error: \(error)"
-            }
-        } else {
-           errorMessage = ": tunnel is not ready"
-        }
-        wg_log(.error, message: "failed to send message to packet tunnel \(String(describing: errorMessage))")
-        if let responseHandler = responseHandler {
-            responseHandler(nil)
-        }
-    }
-    fileprivate func sendCommand(_ cmd: String, _ args: String, completionHandler: @escaping (String) -> Void) {
-        //wg_log(.debug, message: "Tunnel: \(name) command: \(cmd) args: \(args)")
-        let dict = ["method": cmd, "arguments": args]
-        let encoder = JSONEncoder()
-        if let jsonData = try? encoder.encode(dict) {
-            sendProviderMessage(jsonData) { data in
-                if let data = data {
-                    if let status = String(data: data, encoding: .utf8) {
-                        completionHandler(status)
-                    } else {
-                        completionHandler("failed to convert response data to string")
-                    }
-                } else {
-                    completionHandler("received empty response data")
-                }
-            }
+    func getWgLogs(completionHandler: @escaping ([String]) -> Void) {
+        logViewHelper = LogViewHelper(logFilePath: FileManager.logFileURL?.path)
+        guard !isFetchingLogEntries else {
+            completionHandler([])
             return
         }
-        completionHandler("failed to encode json")
+        isFetchingLogEntries = true
+        getLogFileLogs(logViewHelper) { ret in
+            self.isFetchingLogEntries = false
+            debugLog("getWgLogs: \(ret.count)")
+            completionHandler(ret)
+        }
+    }
+
+    private func getLogFileLogs(
+        _ logViewHelper: LogViewHelper?,
+        completionHandler: @escaping ([String]) -> Void
+    ) {
+        var ret: [String] = []
+        debugLog("fetching the log entries")
+        logViewHelper?.fetchLogEntriesSinceLastFetch { fetchedLogEntries in
+            defer {
+                debugLog("returning the log entries, cnt=\(ret.count)")
+                completionHandler(ret)
+            }
+            guard !fetchedLogEntries.isEmpty else { return }
+            let max = 5000
+            debugLog("debug log file lines: \(ret.count)")
+            let start = fetchedLogEntries.count > max ? fetchedLogEntries.count - max : 0
+            let logEntries = fetchedLogEntries[start...]
+            for logEntry in logEntries {
+                ret.append(logEntry.timestamp + ": " + logEntry.message)
+            }
+        }
+    }
+
+    func start(_ tunnelName: String) {
+        guard let tunnel = tunnel(named: tunnelName) else {
+            debugLog("Tunnel '\(tunnelName)' invalid")
+            return
+        }
+        startActivation(of: tunnel)
+    }
+}
+
+private extension TunnelContainer {
+    func sendProviderMessage(_ messageData: Data, responseHandler: ((Data?) -> Void)? = nil) {
+        guard let session = tunnelProvider.connection as? NETunnelProviderSession else {
+            errorLog("Tunnel is not ready to send message to the network extension")
+            responseHandler?(nil)
+            return
+        }
+        guard session.status == .connected else {
+            infoLog("Tunnel not yet connected or active. Ignore message sending")
+            responseHandler?(nil)
+            return
+        }
+        do {
+            try session.sendProviderMessage(messageData, responseHandler: responseHandler)
+        } catch {
+            errorLog("send error: \(error)")
+            responseHandler?(nil)
+        }
+    }
+
+    func sendCommand(_ cmd: String, _ args: String, completionHandler: @escaping (String) -> Void) {
+        let dict = ["method": cmd, "arguments": args]
+        let encoder = JSONEncoder()
+        guard let jsonData = try? encoder.encode(dict) else {
+            completionHandler("failed to encode json")
+            return
+        }
+        sendProviderMessage(jsonData) { data in
+            guard let data = data else {
+                completionHandler("failed to get response data")
+                return
+            }
+            guard let status = String(data: data, encoding: .utf8) else {
+                completionHandler("failed to convert response data to string")
+                return
+            }
+            completionHandler(status)
+        }
     }
 }

@@ -116,6 +116,7 @@ class Keychain {
         guard let items = result as? [Data] else { return }
         for item in items {
             if !whitelist.contains(item) {
+                wg_log(.info, message: "Deleting keychain item \(item)")
                 deleteReference(called: item)
             }
         }
