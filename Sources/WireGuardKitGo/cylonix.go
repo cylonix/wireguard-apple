@@ -85,6 +85,12 @@ func chatsReceived(message string) {
 	}
 }
 
+func chatStatus(message string) {
+	if _, err := callWgAdapter("chatStatus", message); err != nil {
+		clogf("Failed to notify chat status: %v", err)
+	}
+}
+
 func ipnNotify(message string) error {
 	if _, err := callWgAdapter("ipnNotify", message); err != nil {
 		clogf("Failed to notify ipn: %v", err)
@@ -621,7 +627,18 @@ func handleCommand(cmd, args string) string {
 		}
 		return result
 	case "start_tailchat":
-		tailchat.SetNotifyTailchatAppFunc(chatsReceived)
+		tailchat.SetNotifyTailchatAppFunc(func(n tailchat.Notify) {
+			if n.Event == tailchat.ChatReceived {
+				chatsReceived(n.Message)
+			} else {
+				v, err := json.Marshal(n)
+				if err != nil {
+					clogf("Error marshalling tailchat notification: %v", err)
+					return
+				}
+				chatStatus(string(v))
+			}
+		})
 		tailchatStartArgs := &tailchat.StartArgs{}
 		if args != "" {
 			err := json.Unmarshal([]byte(args), tailchatStartArgs)

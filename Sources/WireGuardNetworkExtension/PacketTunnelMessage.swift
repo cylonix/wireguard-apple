@@ -10,6 +10,7 @@ enum PacketTunnelMessage {
 
 enum PacketTunnelNotification {
   static let chatsReceived = "io.cylonix.sase.tunnelNotification.chatsReceived"
+  static let chatStatus = "io.cylonix.sase.tunnelNotification.chatStatus"
   static let filesWaiting = "io.cylonix.sase.tunnelNotification.filesWaiting"
   static let ipnNotify = "io.cylonix.sase.tunnelNotification.ipnNotify"
   static let userNotification = "io.cylonix.sase.tunnelNotification.userNotification"
@@ -17,6 +18,7 @@ enum PacketTunnelNotification {
 
 enum PacketTunnelUserDefaultsKey {
     static let chatsReceived = "ChatsReceived"
+    static let chatStatus = "ChatStatus"
     static let filesWaiting = "FilesWaiting"
     static let ipnNotify = "IpnNotify"
 }

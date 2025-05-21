@@ -545,7 +545,7 @@ extension WireGuardAdapter {
         wg_log(.info, message: "Setting up cylonix handlers")
         let context = Unmanaged.passUnretained(self).toOpaque()
         wgSetAdapter(FileManager.sharedFolderURL?.path, context) { context, method, args, buf, len in
-            wg_log(.debug, message: "Cylonix adapter call received")
+            //wg_log(.debug, message: "Cylonix adapter call received")
             guard let context = context, let buf = buf, len > 128 else {
                 wg_log(.error, message: "bad buf or len")
                 return
@@ -560,7 +560,7 @@ extension WireGuardAdapter {
                 let cmd = String(cString: method)
                 let arguments = String(cString: args)
                 var ret = "ERROR: unknown"
-                wg_log(.debug, message: "Cylonix adapter call received \(cmd)")
+                //wg_log(.debug, message: "Cylonix adapter call received \(cmd)")
                 switch cmd {
                 case "setKeychainItem":
                     // Value is base64 encoded so there should be no space in the value
@@ -569,6 +569,9 @@ extension WireGuardAdapter {
                         let k = String(parts[0])
                         let v = String(parts[1])
                         ret = Keychain.setItem(key: k, value: v)
+                    } else if parts.count == 1 {
+                        let k = String(parts[0])
+                        ret = Keychain.setItem(key: k, value: "")
                     } else {
                         ret = "ERROR: invalid key/value arguments"
                     }
@@ -580,6 +583,8 @@ extension WireGuardAdapter {
                     ret = unretainedSelf.handleIpnNotify(arguments)
                 case "chatsReceived":
                     ret = unretainedSelf.handleChatsReceived(arguments)
+                case "chatStatus":
+                    ret = unretainedSelf.handleChatStatus(arguments)
                 case "filesWaiting":
                     ret = unretainedSelf.handleFilesWaiting(arguments)
                 default:
@@ -668,14 +673,14 @@ extension WireGuardAdapter {
             if let data = try? JSONSerialization.data(withJSONObject: queue) {
                 try? data.write(to: queueFile, options: .atomicWrite)
             }
-            wg_log(.info, message: "Notification queue updated with \(notification)")
+            //wg_log(.info, message: "Notification queue updated with \(notification)")
         }
         if let error = coorError {
             wg_log(.error, message: "Failed to access notification queue: \(error.localizedDescription)")
             return "ERROR: Failed to access notification queue: \(error.localizedDescription)"
         }
 
-        wg_log(.info, message: "Notification queue updated with \(notification)")
+        //wg_log(.info, message: "Notification queue updated with \(notification)")
         CFNotificationCenterPostNotification(notificationCenter, CFNotificationName(notificationName), nil, nil, true)
         return ""
     }
@@ -740,6 +745,17 @@ extension WireGuardAdapter {
         defaults.set(chatsReceived, forKey: PacketTunnelUserDefaultsKey.chatsReceived)
         defaults.synchronize()
         postNotification(notification: PacketTunnelNotification.chatsReceived)
+        return ""
+    }
+
+    private func handleChatStatus(_ status: String) -> String {
+        guard let defaults = sharedDefaults() else {
+            wg_log(.error, message: "Failed to access shared defaults")
+            return "ERROR: Failed to access shared defaults"
+        }
+        defaults.set(status, forKey: PacketTunnelUserDefaultsKey.chatStatus)
+        defaults.synchronize()
+        postNotification(notification: PacketTunnelNotification.chatStatus)
         return ""
     }
 
