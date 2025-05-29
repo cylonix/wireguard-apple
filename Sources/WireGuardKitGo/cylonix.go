@@ -716,6 +716,18 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error sending files to peer: %v", err)
 		}
 		return "Success: " + result
+	case "watch_notifications":
+		log.Println("Starting notification manager")
+		if notifyManager != nil {
+			log.Println("Stopping previous notification manager")
+			notifyManager.Stop()
+		}
+		notifyManager = app.WatchNotifications(notificationMarsk(), &notificationCallback{})
+		if notifyManager == nil {
+			return "Error: failed to start notification manager"
+		}
+		log.Println("Notification manager started successfully")
+		return "Success"
 	default:
 		return fmt.Sprintf("Unknown command: %v", cmd)
 	}
