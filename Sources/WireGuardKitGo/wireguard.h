@@ -22,7 +22,7 @@ extern const char *wgVersion();
 
 // __BEGIN_CYLONIX_MOD__
 typedef void(*adapter_fn_t)(void *context, const char *method, const char *args, char *resp_buf, int resp_buf_len);
-extern void wgSetAdapter(const char *group_dir, void *context, adapter_fn_t adapter_fn);
+extern void wgSetAdapter(const char *sys_info, void *context, adapter_fn_t adapter_fn);
 extern char *wgSendCommand(const char *cmd, const char *args);
 // __END_CYLONIX_MOD__
 #endif

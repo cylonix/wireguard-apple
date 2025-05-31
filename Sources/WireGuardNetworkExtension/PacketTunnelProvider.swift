@@ -148,24 +148,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         }
                     }
                 default:
-                    let args = json["arguments"] as? String ?? ""
-                    var ret = "Failed to send command '\(method)' to service"
-                    // wg_log(.debug, message: "command '\(method)'")
-                    if let result = wgSendCommand(method, args) {
-                        // wg_log(.debug, message: "command '\(method)' response: \(result)")
-                        ret = String(cString: result)
-                        free(result)
-                    }
-                    // Current profile is very frequent. Skip logging for it.
-                    // Skip logging for log command too.
-                    if method != "current_profile" && method != "log" {
-                        wg_log(.debug, message: "command '\(method)' response: \(ret)")
-                    }
-
-                    if let data = ret.data(using: .utf8), let completionHandler = completionHandler {
-                        // wg_log(.debug, message: "command '\(method)'s response is sent to completion handler")
-                        completionHandler(data)
-                    }
+                    handleAppCommands(method, json["arguments"] as? String ?? "", completionHandler)
                     return
                 }
             }
@@ -262,6 +245,27 @@ extension PacketTunnelProvider {
                     wg_log(.info, message: "Successfully disabled on-demand rules")
                 }
                 self.completeStop(completionHandler)
+            }
+        }
+    }
+}
+
+extension PacketTunnelProvider {
+    private func handleAppCommands(_ method: String, _ args: String, _ completionHandler: ((Data?) -> Void)?) {
+        let appCmdQueue = DispatchQueue(label: "io.cylonix.sase.wireguard.appCmdQueue", qos: .userInitiated)
+        appCmdQueue.async {
+            var ret = "Failed to send command '\(method)' to service"
+            if let result = wgSendCommand(method, args) {
+                ret = String(cString: result)
+                free(result)
+            }
+            if let completionHandler = completionHandler {
+                if let data = ret.data(using: .utf8) {
+                    completionHandler(data)
+                } else {
+                    wg_log(.error, message: "Failed to handle app command: \(method) with args: \(args): failed to convert response to Data")
+                    completionHandler(nil)
+                }
             }
         }
     }

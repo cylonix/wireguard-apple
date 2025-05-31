@@ -379,46 +379,11 @@ func (c *CylonixAppCtx) DecryptFromPref(key string) (string, error) {
 }
 
 func (c *CylonixAppCtx) GetOSVersion() (string, error) {
-	var uname unix.Utsname
-	if err := unix.Uname(&uname); err != nil {
-		return "", err
-	}
-
-	// Convert release to string and trim nulls
-	release := make([]byte, 0, len(uname.Release))
-	for _, b := range uname.Release {
-		if b == 0 {
-			break
-		}
-		release = append(release, byte(b))
-	}
-
-	return "iOS " + string(release), nil
+	return systemInfo.OSVersion, nil
 }
 
 func (c *CylonixAppCtx) GetModelName() (string, error) {
-	var uname unix.Utsname
-	if err := unix.Uname(&uname); err != nil {
-		return "", err
-	}
-
-	// Convert machine to string and trim nulls
-	machine := make([]byte, 0, len(uname.Machine))
-	for _, b := range uname.Machine {
-		if b == 0 {
-			break
-		}
-		machine = append(machine, byte(b))
-	}
-
-	// Map hardware model to marketing name
-	model := string(machine)
-	marketingName := getDeviceMarketingName(model)
-	if marketingName != "" {
-		return marketingName, nil
-	}
-
-	return model, nil
+	return systemInfo.DeviceModel, nil
 }
 
 // Helper function to map hardware model identifiers to marketing names
@@ -548,7 +513,7 @@ func isClientDependantCmd(cmd string) bool {
 }
 
 func handleCommand(cmd, args string) string {
-	//clogf("Received cmd: %v args: %v", cmd, args)
+	//log.Printf("Received cmd: %v args: %v", cmd, args)
 	if app == nil && isClientDependantCmd(cmd) {
 		return "App not initialized"
 	}

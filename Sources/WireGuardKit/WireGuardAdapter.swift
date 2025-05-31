@@ -4,7 +4,9 @@
 import Foundation
 import NetworkExtension
 import UserNotifications
-
+#if os(macOS)
+import IOKit
+#endif
 #if SWIFT_PACKAGE
 import WireGuardKitGo
 import WireGuardKitC
@@ -544,8 +546,104 @@ extension WireGuardAdapter {
     private func setupCylonixHandler() {
         wg_log(.info, message: "Setting up cylonix handlers")
         let context = Unmanaged.passUnretained(self).toOpaque()
-        wgSetAdapter(FileManager.sharedFolderURL?.path, context) { context, method, args, buf, len in
-            //wg_log(.debug, message: "Cylonix adapter call received")
+        let systemInfo: [String: String] = [
+            "shared_folder_url": FileManager.sharedFolderURL?.path ?? "",
+            "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+            "device_model": {
+                #if os(iOS)
+                    var systemInfo = utsname()
+                    uname(&systemInfo)
+                    let modelCode = withUnsafePointer(to: &systemInfo.machine) {
+                        $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+                            ptr in String(validatingUTF8: ptr)
+                        }
+                    } ?? "Unknown"
+                    // Map common device identifiers to marketing names
+                    let modelMap = [
+                        "iPhone10,3": "iPhone X", // iPhone X (GSM)
+                        "iPhone10,6": "iPhone X", // iPhone X (Global)
+                        "iPhone11,2": "iPhone XS", // iPhone XS
+                        "iPhone11,4": "iPhone XS Max", // iPhone XS Max (China)
+                        "iPhone11,6": "iPhone XS Max", // iPhone XS Max
+                        "iPhone11,8": "iPhone XR", // iPhone XR
+
+                        "iPhone12,1": "iPhone 11",
+                        "iPhone12,3": "iPhone 11 Pro",
+                        "iPhone12,5": "iPhone 11 Pro Max",
+
+                        "iPhone13,1": "iPhone 12 mini",
+                        "iPhone13,2": "iPhone 12",
+                        "iPhone13,3": "iPhone 12 Pro",
+                        "iPhone13,4": "iPhone 12 Pro Max",
+
+                        "iPhone14,2": "iPhone 13 Pro",
+                        "iPhone14,3": "iPhone 13 Pro Max",
+                        "iPhone14,4": "iPhone 13 mini",
+                        "iPhone14,5": "iPhone 13",
+
+                        "iPhone14,7": "iPhone 14",
+                        "iPhone14,8": "iPhone 14 Plus",
+                        "iPhone15,2": "iPhone 14 Pro",
+                        "iPhone15,3": "iPhone 14 Pro Max",
+
+                        "iPhone16,1": "iPhone 15 Pro",
+                        "iPhone16,2": "iPhone 15 Pro Max",
+                        "iPhone16,3": "iPhone 15",
+                        "iPhone16,4": "iPhone 15 Plus",
+
+                        "iPad13,4": "iPad Pro 11-inch (3rd generation)",
+                        "iPad13,8": "iPad Pro 12.9-inch (5th generation)",
+                        "iPad13,16": "iPad Pro 11-inch (4th generation)",
+                        "iPad13,17": "iPad Pro 12.9-inch (6th generation)",
+                        // Add more mappings as needed
+                    ]
+                    return modelMap[modelCode] ?? modelCode // Return marketing name if available, otherwise return identifier
+
+                #else
+                    // Get Mac model identifier
+                    let service = IOServiceGetMatchingService(kIOMasterPortDefault,
+                                                              IOServiceMatching("IOPlatformExpertDevice"))
+                    defer { IOObjectRelease(service) }
+
+                    if let modelData = IORegistryEntryCreateCFProperty(service,
+                                                                       "model" as CFString,
+                                                                       kCFAllocatorDefault, 0).takeRetainedValue() as? Data,
+                        let modelString = String(data: modelData, encoding: .utf8)?.trimmingCharacters(in: .controlCharacters)
+                    {
+                        // Map common Mac identifiers to marketing names
+                        let macModelMap = [
+                            // Mac Mini
+                            "MacMini9,1": "Mac mini (M1, 2020)",
+                            "MacMini8,1": "Mac mini (2018)",
+                            // iMac
+                            "iMac21,1": "iMac 24-inch (M1, 2021)",
+                            "iMac20,1": "iMac 27-inch (2020)",
+                            // MacBook Pro
+                            "MacBookPro18,1": "MacBook Pro 16-inch (M1 Pro/Max, 2021)",
+                            "MacBookPro18,2": "MacBook Pro 16-inch (M1 Pro/Max, 2021)",
+                            "MacBookPro17,1": "MacBook Pro 13-inch (M1, 2020)",
+                            // MacBook Air
+                            "MacBookAir10,1": "MacBook Air (M1, 2020)",
+                            "MacBookAir9,1": "MacBook Air (Retina, 2020)",
+                            // Mac Pro
+                            "MacPro7,1": "Mac Pro (2019)",
+                            // Mac Studio
+                            "Mac13,1": "Mac Studio (M1 Max, 2022)",
+                            "Mac13,2": "Mac Studio (M1 Ultra, 2022)",
+                        ]
+                        return macModelMap[modelString] ?? modelString
+                    }
+                    return "Mac"
+                #endif
+            }(),
+        ]
+
+        // Convert to JSON string
+        let jsonData = try? JSONSerialization.data(withJSONObject: systemInfo)
+        let systemInfoJson = String(data: jsonData ?? Data(), encoding: .utf8) ?? "{}"
+
+        wgSetAdapter(systemInfoJson, context) { context, method, args, buf, len in
+            // wg_log(.debug, message: "Cylonix adapter call received")
             guard let context = context, let buf = buf, len > 128 else {
                 wg_log(.error, message: "bad buf or len")
                 return
@@ -695,7 +793,7 @@ extension WireGuardAdapter {
         wg_log(.info, message: "Posted notification: \(notification)")
     }
 
-    private func handleFilesWaiting(_ filesWaitingDetails: String) -> String{
+    private func handleFilesWaiting(_ filesWaitingDetails: String) -> String {
         guard let defaults = sharedDefaults() else {
             wg_log(.error, message: "Failed to access shared defaults")
             return "ERROR: Failed to access shared defaults"
@@ -921,5 +1019,12 @@ private func packetTunnelDarwinCallback(
         .fromOpaque(observerRaw)
         .takeUnretainedValue()
     wg_log(.info, message: "packetTunnelDarwinCallback: Darwin notification received: \(String(describing: cfName))")
-    adapter.handleDarwinNotification(cfName)
+
+    // Create a background queue for handling notifications
+    let notificationQueue = DispatchQueue(label: "io.cylonix.sase.wireguard.notificationQueue", qos: .userInitiated)
+
+    // Handle notification asynchronously
+    notificationQueue.async {
+        adapter.handleDarwinNotification(cfName)
+    }
 }

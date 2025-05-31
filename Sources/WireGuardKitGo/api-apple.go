@@ -18,6 +18,7 @@ import "C"
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -127,14 +128,31 @@ var (
 	useCylonixBackend = true
 	turnOnProfiling   = false
 	groupFolder       string
+	systemInfo        SystemInfo
 	errorLogf         = CLogger(1).Printf
 )
 
+type SystemInfo struct {
+	SharedFolderURL string `json:"shared_folder_url"`
+	OSVersion       string `json:"os_version"`
+	DeviceModel     string `json:"device_model"`
+}
+
 //export wgSetAdapter
-func wgSetAdapter(groupDir *C.char, context, adapterFn uintptr) {
+func wgSetAdapter(sysInfo *C.char, context, adapterFn uintptr) {
 	adapterCtx = unsafe.Pointer(context)
 	adapterFunc = unsafe.Pointer(adapterFn)
-	groupFolder = C.GoString(groupDir)
+
+	// Decode system info JSON
+	sysInfoStr := C.GoString(sysInfo)
+	if err := json.Unmarshal([]byte(sysInfoStr), &systemInfo); err != nil {
+		log.Printf("Error decoding system info: %v", err)
+	} else {
+		log.Printf("System info received: %+v", systemInfo)
+	}
+
+	// Set group folder from shared folder URL
+	groupFolder = systemInfo.SharedFolderURL
 	log.Printf("Set up adapter callback groupFolder=%v adapterFn=%v", groupFolder, adapterFn)
 }
 
@@ -335,11 +353,11 @@ func wgSendCommand(cmd *C.char, args *C.char) *C.char {
 			if len(result) > 256 {
 				s = result[:256]
 			}
-			clogf("send command '%v' result: %v", goCmd, s)
+			log.Printf("send command '%v' result: %v", goCmd, s)
 		}
 		return C.CString(result)
 	case <-ctx.Done():
-		clogf("send command '%v' timed out after 5 seconds", goCmd)
+		log.Printf("[ERROR] send command '%v' timed out after 5 seconds", goCmd)
 		return C.CString(`{"error": "command timed out"}`)
 	}
 }
@@ -372,9 +390,7 @@ func callWgAdapter(method, args string) ([]byte, error) {
 		errMsg := strings.TrimPrefix(resp, "ERROR: ")
 		return nil, errors.New(errMsg)
 	}
-	if strings.HasPrefix(resp, "SUCCESS: ") {
-		resp = strings.TrimPrefix(resp, "SUCCESS: ")
-	}
+	resp = strings.TrimPrefix(resp, "SUCCESS: ")
 	return []byte(resp), nil
 }
 
