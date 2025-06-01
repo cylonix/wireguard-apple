@@ -613,8 +613,8 @@ extension WireGuardAdapter {
                         // Map common Mac identifiers to marketing names
                         let macModelMap = [
                             // Mac Mini
-                            "MacMini9,1": "Mac mini (M1, 2020)",
-                            "MacMini8,1": "Mac mini (2018)",
+                            "Macmini9,1": "Mac mini (M1, 2020)",
+                            "Macmini8,1": "Mac mini (2018)",
                             // iMac
                             "iMac21,1": "iMac 24-inch (M1, 2021)",
                             "iMac20,1": "iMac 27-inch (2020)",
