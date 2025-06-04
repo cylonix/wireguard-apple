@@ -305,6 +305,9 @@ func wgDisableSomeRoamingForBrokenMobileSemantics(tunnelHandle int32) {
 
 //export wgVersion
 func wgVersion() *C.char {
+	if useCylonixBackend {
+		return C.CString(cylonixVersion())
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return C.CString("unknown")

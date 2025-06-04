@@ -20,6 +20,7 @@ extension NETunnelProviderProtocol {
         providerBundleIdentifier = "\(appId).network-extension"
         passwordReference = Keychain.makeReference(containing: tunnelConfiguration.asWgQuickConfig(), called: name, previouslyReferencedBy: old?.passwordReference)
         if passwordReference == nil {
+            wg_log(.error, message: "Failed to create keychain reference for tunnel configuration '\(name)'")
             return nil
         }
         #if os(macOS)

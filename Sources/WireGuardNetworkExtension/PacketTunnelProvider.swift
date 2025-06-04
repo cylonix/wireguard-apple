@@ -5,19 +5,20 @@ import BackgroundTasks
 import Foundation
 import NetworkExtension
 import os
+#if os(iOS)
+import UIKit
+#endif
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     override init() {
-        wg_log(.debug, message: "Process ID&&&&&&&&&&&&&&&: \(ProcessInfo.processInfo.processIdentifier)")
-        wg_log(.info, message: "PacketTunnelProvider init called")
+        wg_log(.info, message: "=========== PacketTunnelProvider initialization ===========")
         wg_log(.info, message: "Process ID: \(ProcessInfo.processInfo.processIdentifier)")
         wg_log(.info, message: "Process name: \(ProcessInfo.processInfo.processName)")
         super.init()
     }
 
     private lazy var adapter: WireGuardAdapter = {
-        // Add initialization logging
-        wg_log(.info, message: "====1======= PacketTunnelProvider initialization =======1====")
+        wg_log(.info, message: "=========== PacketTunnelProvider WireGuardAdapter ===========")
         wg_log(.info, message: "Bundle identifier: \(Bundle.main.bundleIdentifier ?? "unknown")")
         wg_log(.info, message: "Process path: \(Bundle.main.executablePath ?? "unknown")")
         wg_log(.info, message: "Bundle path: \(Bundle.main.bundlePath)")
@@ -175,8 +176,27 @@ extension WireGuardLogLevel {
 }
 
 extension PacketTunnelProvider {
+    // https://developer.apple.com/forums/thread/133162
+    // Skip for known problematic OS versions
+    private func canLoadVPNConfig() -> Bool {
+        #if os(iOS)
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersion
+        if osVersion.majorVersion == 16 &&
+            UIDevice.current.userInterfaceIdiom == .pad {
+            wg_log(.info, message: "Skipping on-demand check on iPadOS 16.x due to known issues")
+            return false
+        }
+        #endif
+        return true
+    }
+
     private func checkOnDemandSettingsOnStart(_ activationAttemptId: String?) {
+        if !canLoadVPNConfig() {
+            return
+        }
+
         // Check if on-demand was enabled from system settings
+        wg_log(.info, message: "Checking on-demand settings on start")
         NETunnelProviderManager.loadAllFromPreferences { managers, error in
             if let error = error {
                 wg_log(.error, message: "Failed to load tunnel managers: \(error.localizedDescription)")
@@ -184,6 +204,7 @@ extension PacketTunnelProvider {
                 guard let proto = manager.protocolConfiguration as? NETunnelProviderProtocol else { return false }
                 return proto.providerBundleIdentifier == Bundle.main.bundleIdentifier && manager.isEnabled
             }) {
+                wg_log(.info, message: "Found our tunnel configuration: \(ourManager.localizedDescription)")
                 if activationAttemptId != nil, !ourManager.isOnDemandEnabled {
                     wg_log(.info, message: "On-demand was disabled from system settings, enabling it")
                     ourManager.isOnDemandEnabled = true
@@ -197,9 +218,13 @@ extension PacketTunnelProvider {
                 }
             }
         }
+        wg_log(.info, message: "On-demand settings check completed")
     }
 
     private func checkOnDemandSettingsOnStop(reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        if !canLoadVPNConfig() {
+            return
+        }
         if reason != .userInitiated {
             completeStop(completionHandler)
             return

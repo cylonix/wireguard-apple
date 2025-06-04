@@ -24,6 +24,7 @@ import (
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/types/logger"
+	"tailscale.com/version"
 )
 
 const (
@@ -73,6 +74,11 @@ func initCylonixBackend(tunFd int32) int32 {
 	savedTunFd = tunFd
 	return 0
 }
+
+func cylonixVersion() string {
+	return "Cylonix " + version.Long()
+}
+
 func filesWaiting(message string) {
 	if _, err := callWgAdapter("filesWaiting", message); err != nil {
 		clogf("Failed to notify files waiting: %v", err)

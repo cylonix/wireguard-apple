@@ -146,6 +146,7 @@ public class WireGuardAdapter {
     ///   as a weak reference.
     /// - Parameter logHandler: a log handler closure.
     public init(with packetTunnelProvider: NEPacketTunnelProvider, logHandler: @escaping LogHandler) {
+        wg_log(.info, message: "WireGuardAdapter initialized with version \(WireGuardAdapter.backendVersion)")
         self.packetTunnelProvider = packetTunnelProvider
         self.logHandler = logHandler
 
@@ -194,6 +195,7 @@ public class WireGuardAdapter {
     public func start(tunnelConfiguration: TunnelConfiguration, completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
         workQueue.async {
             guard case .stopped = self.state else {
+                wg_log(.error, message: "Start: invalid state \(self.state)")
                 completionHandler(.invalidState)
                 return
             }
