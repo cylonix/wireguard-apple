@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	dashs = "__________________________"
+	dashes = "__________________________"
 
 	alwaysUseRelayEnabledStateKey = ipn.StateKey("_always_use_relay_enabled")
 	tailchatStateKey              = ipn.StateKey("_tailchat")
@@ -41,7 +41,7 @@ var (
 	cachedNetworkSettings *NetworkSettings
 	clogf                 = logger.WithPrefix(CLogger(0).Printf, "[Cylonix]: ")
 	cylonixInitDone       = false
-	fileWatingManager     libtailscale.NotificationManager
+	filesWaitingManager   libtailscale.NotificationManager
 	notifyManager         libtailscale.NotificationManager
 	savedTunFd            int32 = -1
 	service               *ipnService
@@ -150,7 +150,7 @@ func getTunnelFileDescriptor() (int32, error) {
 }
 
 func getSharedAppGroupDir() (string, error) {
-	clogf("%v getSharedAppGroupDir %v", dashs, dashs)
+	clogf("%v getSharedAppGroupDir %v", dashes, dashes)
 	if groupFolder == "" {
 		return "", fmt.Errorf("container path not set")
 	}
@@ -169,7 +169,7 @@ func setAlwaysUseRelay() {
 }
 
 func cylonixInit() error {
-	clogf("%v Cylonix Init %v", dashs, dashs)
+	clogf("%v Cylonix Init %v", dashes, dashes)
 	dataDir, err := getSharedAppGroupDir()
 	if err != nil {
 		return fmt.Errorf("failed to get shared app group dir: %w", err)
@@ -178,9 +178,9 @@ func cylonixInit() error {
 		notifyManager.Stop()
 		notifyManager = nil
 	}
-	if fileWatingManager != nil {
-		fileWatingManager.Stop()
-		fileWatingManager = nil
+	if filesWaitingManager != nil {
+		filesWaitingManager.Stop()
+		filesWaitingManager = nil
 	}
 	a := &CylonixAppCtx{store: store}
 
@@ -219,9 +219,9 @@ func cylonixInit() error {
 
 	// Verify logging is working
 	clogf("Log output successfully initialized")
-	clogf("%v dataDir: %v %v", dashs, dataDir, dashs)
+	clogf("%v dataDir: %v %v", dashes, dataDir, dashes)
 	store = newStateStore()
-	clogf("%v starting libtailscale %v", dashs, dashs)
+	clogf("%v starting libtailscale %v", dashes, dashes)
 	tailDropDir, err := getPlatformTailDropDir()
 	if err != nil {
 		return fmt.Errorf("failed to get platform taildrop dir: %w", err)
@@ -257,14 +257,14 @@ func cylonixInit() error {
 	app = libtailscale.Start(dataDir, tailDropDir, a)
 	go func() {
 		clogf("Start watching for notifications")
-		notifyManager = app.WatchNotifications(notificationMarsk(), &notificationCallback{})
-		if fileWatingManager != nil {
-			clogf("FileWatingManager is not nil. This is not expected. Stopping it")
-			fileWatingManager.Stop()
+		notifyManager = app.WatchNotifications(notificationMarks(), &notificationCallback{})
+		if filesWaitingManager != nil {
+			clogf("filesWaitingManager is not nil. This is not expected. Stopping it")
+			filesWaitingManager.Stop()
 		}
-		fileWatingManager = app.WatchAwaitingFiles(handleFilesWaiting)
+		filesWaitingManager = app.WatchAwaitingFiles(handleFilesWaiting)
 	}()
-	clogf("%v libtailscale started %v", dashs, dashs)
+	clogf("%v libtailscale started %v", dashes, dashes)
 	return nil
 }
 
@@ -390,34 +390,6 @@ func (c *CylonixAppCtx) GetOSVersion() (string, error) {
 
 func (c *CylonixAppCtx) GetModelName() (string, error) {
 	return systemInfo.DeviceModel, nil
-}
-
-// Helper function to map hardware model identifiers to marketing names
-func getDeviceMarketingName(model string) string {
-	deviceMap := map[string]string{
-		"iPhone14,2": "iPhone 13 Pro",
-		"iPhone14,3": "iPhone 13 Pro Max",
-		"iPhone14,4": "iPhone 13 mini",
-		"iPhone14,5": "iPhone 13",
-		"iPhone15,2": "iPhone 14 Pro",
-		"iPhone15,3": "iPhone 14 Pro Max",
-		"iPhone15,4": "iPhone 14",
-		"iPhone15,5": "iPhone 14 Plus",
-		"iPhone16,1": "iPhone 15 Pro",
-		"iPhone16,2": "iPhone 15 Pro Max",
-		"iPhone16,3": "iPhone 15",
-		"iPhone16,4": "iPhone 15 Plus",
-		"iPad13,4":   "iPad Pro 11-inch (3rd generation)",
-		"iPad13,8":   "iPad Pro 12.9-inch (5th generation)",
-		"iPad13,16":  "iPad Pro 11-inch (4th generation)",
-		"iPad13,17":  "iPad Pro 12.9-inch (6th generation)",
-		// Add more models as needed
-	}
-
-	if name, ok := deviceMap[model]; ok {
-		return name
-	}
-	return ""
 }
 
 func (c *CylonixAppCtx) GetInstallSource() string {
@@ -614,7 +586,7 @@ func handleCommand(cmd, args string) string {
 		if args != "" {
 			err := json.Unmarshal([]byte(args), tailchatStartArgs)
 			if err != nil {
-				return fmt.Sprintf("Error unmarshalling args: %v", err)
+				return fmt.Sprintf("Error unmarshaling args: %v", err)
 			}
 		}
 		if err := tailchat.Start(*tailchatStartArgs); err != nil {
@@ -681,7 +653,7 @@ func handleCommand(cmd, args string) string {
 		result := ""
 		sendArgs := &SendFilesToPeerArgs{}
 		if err := json.Unmarshal([]byte(args), sendArgs); err != nil {
-			return fmt.Sprintf("Error unmarshalling args: %v", err)
+			return fmt.Sprintf("Error unmarshaling args: %v", err)
 		}
 		if err := client.PutTaildropFiles(sendArgs.PeerID, sendArgs.Files, &result); err != nil {
 			return fmt.Sprintf("Error sending files to peer: %v", err)
@@ -693,12 +665,22 @@ func handleCommand(cmd, args string) string {
 			log.Println("Stopping previous notification manager")
 			notifyManager.Stop()
 		}
-		notifyManager = app.WatchNotifications(notificationMarsk(), &notificationCallback{})
+		notifyManager = app.WatchNotifications(notificationMarks(), &notificationCallback{})
 		if notifyManager == nil {
 			return "Error: failed to start notification manager"
 		}
 		log.Println("Notification manager started successfully")
 		return "Success"
+	case "set_dns_config":
+		argsSlice := strings.Split(args, " ")
+		if len(argsSlice) < 2 {
+			return "Error: insufficient arguments for set_dns_config"
+		}
+		interfaceName := argsSlice[1]
+		dnsConfig := argsSlice[0]
+		log.Printf("Setting DNS config for interface %s: %s", interfaceName, dnsConfig)
+		libtailscale.OnDNSConfigChanged(interfaceName)
+		return "Success: DNS config set for " + interfaceName
 	default:
 		return fmt.Sprintf("Unknown command: %v", cmd)
 	}
@@ -719,7 +701,7 @@ func onEnvknobSetAlwaysUseRelay(setting string, client *libtailscale.Client) err
 		}
 		clogf("Rebinding DONE. Re-stunning for alwaysUserRelay(%v)", on)
 		if err := client.DebugReStun(); err != nil {
-			return fmt.Errorf("failed to restun for alwaysUserRelay(%v): %w", on, err)
+			return fmt.Errorf("failed to re-stun for alwaysUserRelay(%v): %w", on, err)
 		}
 		clogf("Re-stunning DONE for alwaysUserRelay(%v)", on)
 	}
@@ -768,7 +750,7 @@ func parseKeyValue(s string) (map[string]string, error) {
 	return result, nil
 }
 
-func notificationMarsk() int {
+func notificationMarks() int {
 	// EngineUpdate | Netmap | Prefs | InitialState | InitialHealthState
 	return int(
 		//ipn.NotifyWatchEngineUpdates |
@@ -936,7 +918,7 @@ func (s *ipnService) ID() string {
 }
 
 func (s *ipnService) Protect(fd int32) bool {
-	// Not-yet-impleneted but returns true to avoid noise.
+	// Not-yet-implemented but returns true to avoid noise.
 	return true
 }
 
@@ -953,7 +935,7 @@ func (s *ipnService) Close() {
 }
 
 func (s *ipnService) DisconnectVPN() {
-	// not-implemeted yet.
+	// not-implemented yet.
 	// Send packet tunnel update?
 }
 
@@ -976,6 +958,8 @@ func turnOffVPN() error {
 		return nil
 	}
 	clogf("Turn off VPN: skip clearing network settings.")
+	//log.Printf("Disconnecting VPN service: %v", service.ID())
+	//libtailscale.ServiceDisconnect(service)
 	return nil
 }
 

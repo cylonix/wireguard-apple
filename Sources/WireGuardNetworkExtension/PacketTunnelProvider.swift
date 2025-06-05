@@ -10,6 +10,10 @@ import UIKit
 #endif
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
+    #if os(iOS)
+    private let networkMonitor = NetworkMonitor() // __CYLONIX_MOD__
+    #endif
+
     override init() {
         wg_log(.info, message: "=========== PacketTunnelProvider initialization ===========")
         wg_log(.info, message: "Process ID: \(ProcessInfo.processInfo.processIdentifier)")
@@ -104,6 +108,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 fatalError()
             }
         }
+        #if os(iOS)
+        startNetworkMonitor() // __CYLONIX_MOD__
+        #endif
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
@@ -204,7 +211,7 @@ extension PacketTunnelProvider {
                 guard let proto = manager.protocolConfiguration as? NETunnelProviderProtocol else { return false }
                 return proto.providerBundleIdentifier == Bundle.main.bundleIdentifier && manager.isEnabled
             }) {
-                wg_log(.info, message: "Found our tunnel configuration: \(ourManager.localizedDescription)")
+                wg_log(.info, message: "Found our tunnel configuration: \(String(describing: ourManager.localizedDescription))")
                 if activationAttemptId != nil, !ourManager.isOnDemandEnabled {
                     wg_log(.info, message: "On-demand was disabled from system settings, enabling it")
                     ourManager.isOnDemandEnabled = true
@@ -294,4 +301,20 @@ extension PacketTunnelProvider {
             }
         }
     }
+
+    #if os(iOS)
+    private func startNetworkMonitor() {
+        wg_log(.info, staticMessage: "Starting network monitor")
+        networkMonitor.startMonitoring { dnsConfig, interfaceName in
+            wg_log(.info, message: "Network monitor updated DNS server: \(dnsConfig), search domain: \(interfaceName)")
+            if let result = wgSendCommand("set_dns_config", "\(dnsConfig) \(interfaceName)") {
+                let response = String(cString: result)
+                free(result)
+                wg_log(.info, message: "Network monitor set DNS config response: \(response)")
+            } else {
+                wg_log(.error, message: "Network monitor failed to set DNS config")
+            }
+        }
+    }
+    #endif
 }

@@ -409,7 +409,7 @@ func main() {
 
 	// Refer to https://tailscale.com/blog/go-linker/
 	// Although we are getting 50MB in ios 15.1, it is worth to make versions
-	// older that has 15MB network extension memeory limit works too.
+	// older that has 15MB network extension memory limit works too.
 	// Set max proc to 1.
 	//runtime.GOMAXPROCS(1)
 	if turnOnProfiling {
