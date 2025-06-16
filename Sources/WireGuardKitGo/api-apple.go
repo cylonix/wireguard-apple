@@ -374,15 +374,16 @@ func shouldSkipSendCommandLog(cmd string) bool {
 	}
 }
 
-func callWgAdapter(method, args string) ([]byte, error) {
+func callWgAdapter(method, args string, bufSize int) ([]byte, error) {
 	if adapterFunc == nil || adapterCtx == nil {
 		return nil, errors.New("adapter function not set")
 	}
 
 	cMethod := cstring(method)
 	cArgs := cstring(args)
-	cRespBuf := cstringFromBytes(make([]byte, 4096))
-	C.callAdapter(adapterFunc, adapterCtx, cMethod, cArgs, cRespBuf, 4096)
+	cRespBuf := cstringFromBytes(make([]byte, bufSize))
+	cBufLen := C.int(bufSize)
+	C.callAdapter(adapterFunc, adapterCtx, cMethod, cArgs, cRespBuf, cBufLen)
 	resp := C.GoString(cRespBuf)
 	if strings.HasPrefix(resp, "ERROR: ") {
 		s := args

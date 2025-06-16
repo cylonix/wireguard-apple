@@ -52,15 +52,16 @@ func newApp(dataDir, directFileRoot string, appCtx AppContext) Application {
 
 		ctx := context.Background()
 		if err := a.runBackend(ctx); err != nil {
-			fatalErr(err)
+			a.fatalErr(err)
 		}
 	}()
 
 	return a
 }
 
-func fatalErr(err error) {
+func (a *App) fatalErr(err error) {
 	// TODO: expose in UI.
+	a.appCtx.OnFatalError(err)
 	log.Printf("fatal error: %v", err)
 }
 

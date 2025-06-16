@@ -69,7 +69,7 @@ extension Keychain {
             return "ERROR: \(msg)"
         }
 
-        wg_log(.info, message: "Keychain getItem: got item key: \(key) value: \(shortString(value))")
+        wg_log(.info, message: "Keychain getItem: got item key: \(key) value[\(value.count)]: \(shortString(value))")
         return "SUCCESS: \(value)"
     }
 

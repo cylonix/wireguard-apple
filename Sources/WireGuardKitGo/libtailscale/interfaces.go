@@ -67,6 +67,7 @@ type AppContext interface {
 	// __BEGIN_CYLONIX_MOD__
 	TunnelClearConfig()
 	TunnelUpdated(ifIndex int)
+	OnFatalError(err error)
 	// __END_CYLONIX_MOD__
 }
 

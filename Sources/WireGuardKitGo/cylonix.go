@@ -46,6 +46,7 @@ var (
 	savedTunFd            int32 = -1
 	service               *ipnService
 	store                 *stateStore
+	lastNotify            string
 
 	errKeychainItemNotFound = errors.New("keychain item not found")
 )
@@ -80,25 +81,26 @@ func cylonixVersion() string {
 }
 
 func filesWaiting(message string) {
-	if _, err := callWgAdapter("filesWaiting", message); err != nil {
+	if _, err := callWgAdapter("filesWaiting", message, 4096); err != nil {
 		clogf("Failed to notify files waiting: %v", err)
 	}
 }
 
 func chatsReceived(message string) {
-	if _, err := callWgAdapter("chatsReceived", message); err != nil {
+	if _, err := callWgAdapter("chatsReceived", message, 4096); err != nil {
 		clogf("Failed to notify chats received: %v", err)
 	}
 }
 
 func chatStatus(message string) {
-	if _, err := callWgAdapter("chatStatus", message); err != nil {
+	if _, err := callWgAdapter("chatStatus", message, 4096); err != nil {
 		clogf("Failed to notify chat status: %v", err)
 	}
 }
 
 func ipnNotify(message string) error {
-	if _, err := callWgAdapter("ipnNotify", message); err != nil {
+	lastNotify = message
+	if _, err := callWgAdapter("ipnNotify", message, 4096); err != nil {
 		clogf("Failed to notify ipn: %v", err)
 		return fmt.Errorf("failed to notify ipn: %v", err)
 	}
@@ -113,7 +115,7 @@ func setNetworkSettings(settings NetworkSettings) error {
 	j, err := json.MarshalIndent(settings, "", "\t")
 	clogf("Sending network settings %v, err: %v", string(j), err)
 
-	v, err := callWgAdapter("setNetworkSettings", string(jsonBytes))
+	v, err := callWgAdapter("setNetworkSettings", string(jsonBytes), 4096)
 	if err != nil {
 		clogf("Failed to set network settings: %v", err)
 		return fmt.Errorf("failed to set network settings: %v", err)
@@ -123,7 +125,7 @@ func setNetworkSettings(settings NetworkSettings) error {
 }
 
 func setKeychainItem(key, val string) error {
-	if _, err := callWgAdapter("setKeychainItem", key+" "+val); err != nil {
+	if _, err := callWgAdapter("setKeychainItem", key+" "+val, 4096); err != nil {
 		clogf("Failed to set keychain @%q: %v", key, err)
 		return fmt.Errorf("failed to set keychain: %v", err)
 	}
@@ -132,7 +134,7 @@ func setKeychainItem(key, val string) error {
 }
 
 func getKeychainItem(key string) ([]byte, error) {
-	v, err := callWgAdapter("getKeychainItem", key)
+	v, err := callWgAdapter("getKeychainItem", key, 1024*64)
 	if err == nil && string(v) == "keychain item not found" {
 		clogf("Keychain @%q not found", key)
 		return nil, errKeychainItemNotFound
@@ -479,6 +481,22 @@ func (c *CylonixAppCtx) TunnelClearConfig() {
 	clearNetworkSettings()
 }
 
+// Notify the app about a fatal error
+func (c *CylonixAppCtx) OnFatalError(err error) {
+	e := fmt.Sprintf("Backend Fatal Error: %v", err)
+	n := ipn.Notify{ErrMessage: &e}
+	v, err := json.Marshal(n)
+	if v == nil || err != nil {
+		log.Printf("Failed to marshal notify %#v: %v", n, err)
+		return
+	}
+	if err := ipnNotify(string(v)); err != nil {
+		log.Printf("Failed to notify ipn: '%q' %v", string(v), err)
+		return
+	}
+	log.Printf("Sent fatal error notification: %q", string(v))
+}
+
 func isClientDependantCmd(cmd string) bool {
 	switch cmd {
 	case "start_tailchat", "stop_tailchat", "is_tailchat_running":
@@ -664,6 +682,13 @@ func handleCommand(cmd, args string) string {
 		if notifyManager != nil {
 			log.Println("Stopping previous notification manager")
 			notifyManager.Stop()
+		}
+		if lastNotify != "" {
+			log.Printf("Last notify: %q", lastNotify)
+			if err := ipnNotify(lastNotify); err != nil {
+				log.Printf("Failed to send last notify: %v", err)
+				return fmt.Sprintf("Error: failed to send last notify: %v", err)
+			}
 		}
 		notifyManager = app.WatchNotifications(notificationMarks(), &notificationCallback{})
 		if notifyManager == nil {

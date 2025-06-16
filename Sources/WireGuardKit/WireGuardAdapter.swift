@@ -699,6 +699,11 @@ extension WireGuardAdapter {
                 default:
                     ret = "ERROR: method \(cmd) not supported"
                 }
+                guard ret.count < Int(len) else {
+                    wg_log(.error, message: "'\(cmd)(\(arguments))' result too long: \(ret.count) > \(len - 1)")
+                    strlcpy(buf, "ERROR: result too long", Int(len))
+                    return
+                }
                 strlcpy(buf, ret, Int(len))
             }
         }
