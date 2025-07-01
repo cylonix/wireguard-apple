@@ -33,7 +33,7 @@ const (
 	endpointTKASign           = "tka/sign"
 	endpointTKAVerifyDeepLink = "tka/verify-deeplink"
 	endpointPing              = "ping"
-	endpointFiles             = "files"
+	endpointFiles             = "files/"
 	endpointFilePut           = "file-put/"
 	endpointTailfsServerAddr  = "tailfs/fileserver-address"
 	endpointEnableExitNode    = "set-use-exit-node-enabled"
@@ -115,6 +115,10 @@ func (c *Client) Status() (string, error) {
 
 func (c *Client) Logout() error {
 	return c.post(endpointLogout, 0, nil, nil)
+}
+
+func (c *Client) WaitingFiles(result interface{}) error {
+	return c.get(endpointFiles, result)
 }
 
 type countingByteStreamAdapter struct {

@@ -638,6 +638,17 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error logging out: %v", err)
 		}
 		return "Success"
+	case "get_waiting_files":
+		result := []apitype.WaitingFile{}
+		err := client.WaitingFiles(&result)
+		if err != nil {
+			return fmt.Sprintf("Error getting waiting files: %v", err)
+		}
+		v, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Sprintf("Error encoding waiting files: %v", err)
+		}
+		return string(v)
 	case "set_env_knobs":
 		if args == "" {
 			return "Error: no arguments provided"
