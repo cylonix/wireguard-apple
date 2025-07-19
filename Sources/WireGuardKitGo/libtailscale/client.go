@@ -57,8 +57,8 @@ func (c *Client) StartLoginInteractive() error {
 	return err
 }
 
-func (c *Client) EditPrefs(prefsJsonString string) error {
-	return c.patch(endpointPrefs, []byte(prefsJsonString), nil)
+func (c *Client) EditPrefs(prefsJsonString string, result interface{}) error {
+	return c.patch(endpointPrefs, []byte(prefsJsonString), result)
 }
 
 func (c *Client) Profiles(result interface{}) error {

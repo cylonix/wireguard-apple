@@ -534,11 +534,16 @@ func handleCommand(cmd, args string) string {
 		clogf("start login interactive success")
 		return "Success"
 	case "edit_prefs":
-		err := client.EditPrefs(args)
+		result := ipn.Prefs{}
+		err := client.EditPrefs(args, &result)
 		if err != nil {
 			return fmt.Sprintf("Error editing prefs: %v", err)
 		}
-		return "Success"
+		v, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Sprintf("Error encoding updated prefs: %v", err)
+		}
+		return string(v)
 	case "turn_off_vpn":
 		clogf("Turn off VPN requested")
 		if err := turnOffVPN(); err != nil {
