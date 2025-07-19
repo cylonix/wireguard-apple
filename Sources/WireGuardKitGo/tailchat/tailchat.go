@@ -62,11 +62,11 @@ type StartArgs struct {
 }
 
 const (
-	ChatReceived           = "CHAT_RECEIVED"
-	ChatStatusOK           = "CHAT_STATUS_OK"
-	ChatStatusError        = "CHAT_STATUS_ERROR"
-	ChatSendBufferredOK    = "CHAT_SEND_BUFFERRED_OK"
-	ChatSendBufferredError = "CHAT_SEND_BUFFERRED_ERROR"
+	ChatReceived          = "CHAT_RECEIVED"
+	ChatStatusOK          = "CHAT_STATUS_OK"
+	ChatStatusError       = "CHAT_STATUS_ERROR"
+	ChatSendBufferedOK    = "CHAT_SEND_BUFFERED_OK"
+	ChatSendBufferedError = "CHAT_SEND_BUFFERED_ERROR"
 )
 
 type Notify struct {
@@ -466,7 +466,7 @@ func handleSubscriberConnection(conn net.Conn) {
 	if err := sendBufferedMessages(conn, ackChan, errChan); err != nil {
 		logger.Println("Closing subscriber connection", remote, "due to err:", err)
 		stopCh <- struct{}{}
-		notifyTailchatApp(ChatSendBufferredError, "Error sending buffered messages to "+remote.String())
+		notifyTailchatApp(ChatSendBufferedError, "Error sending buffered messages to "+remote.String())
 		return
 	}
 }
@@ -738,7 +738,7 @@ func sendBufferedMessages(conn net.Conn, ackChan chan string, errChan chan error
 			remote, len(failedMessages))
 	}
 
-	notifyTailchatApp(ChatSendBufferredOK,
+	notifyTailchatApp(ChatSendBufferedOK,
 		fmt.Sprintf("%v buffered messages sent to %v", len(messages), remote))
 	return nil
 }
