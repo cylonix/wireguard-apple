@@ -657,6 +657,21 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error encoding waiting files: %v", err)
 		}
 		return string(v)
+	case "get_file_path":
+		if app == nil {
+			return "Error: app not initialized"
+		}
+		path, err := app.GetTailDropFilePath(args)
+		if err != nil {
+			return fmt.Sprintf("Error getting file: %v", err)
+		}
+		return path
+	case "delete_file":
+		err := client.DeleteFile(args)
+		if err != nil {
+			return fmt.Sprintf("Error deleting file '%v': %v", args, err)
+		}
+		return "Success"
 	case "set_env_knobs":
 		if args == "" {
 			return "Error: no arguments provided"
@@ -726,7 +741,7 @@ func handleCommand(cmd, args string) string {
 		libtailscale.OnDNSConfigChanged(interfaceName)
 		return "Success: DNS config set for " + interfaceName
 	default:
-		return fmt.Sprintf("Unknown command: %v", cmd)
+		return fmt.Sprintf("Error: unknown command: %v", cmd)
 	}
 }
 

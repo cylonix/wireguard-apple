@@ -136,12 +136,16 @@ type Application interface {
 	// is invoked on every new ipn.Notify message as native ipn.Notify struct.
 	// The returned NotificationManager allows the watcher to stop watching
 	// notifications.
-	WatchNotificationsRaw(mask int, cb func(*ipn.Notify)()) NotificationManager
+	WatchNotificationsRaw(mask int, cb func(*ipn.Notify)) NotificationManager
 
 	// WatchAwaitingFiles provides a mechanism watch for files waitings and call
-	// the given callbacken when there are files ready. The returned
+	// the given callback when there are files ready. The returned
 	// NotificationManager allows the watcher to stop watching.
-	WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFile)()) NotificationManager
+	WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFile)) NotificationManager
+
+	// GetTailDropFilePath gets a taildrop file path base on the filename.
+	// Basically exposing the taildrop GetFillePath method.
+	GetTailDropFilePath(filename string) (string, error)
 	// ___END_CYLONIX_MOD__
 }
 

@@ -121,6 +121,10 @@ func (c *Client) WaitingFiles(result interface{}) error {
 	return c.get(endpointFiles, result)
 }
 
+func (c *Client) DeleteFile(filename string) error {
+	return c.delete(endpointFiles+filename, nil, nil)
+}
+
 type countingByteStreamAdapter struct {
 	r *bytes.Reader
 	n atomic.Int64
@@ -240,6 +244,18 @@ func (c *Client) PutTaildropFiles(peerID string, files []OutgoingFile, result in
 
 func (c *Client) get(path string, result interface{}) error {
 	resp, err := c.app.CallLocalAPI(defaultTimeout(), "GET", "/localapi/v0/"+path, nil)
+	if err != nil {
+		return fmt.Errorf("calling local API: %w", err)
+	}
+	return handleResponse(resp, result)
+}
+
+func (c *Client) delete(path string, body []byte, result interface{}) error {
+	var input *inputStreamAdapter
+	if body != nil {
+		input = &inputStreamAdapter{data: body}
+	}
+	resp, err := c.app.CallLocalAPI(defaultTimeout(), "DELETE", "/localapi/v0/"+path, input)
 	if err != nil {
 		return fmt.Errorf("calling local API: %w", err)
 	}

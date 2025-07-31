@@ -113,12 +113,12 @@ func (a *App) runBackend(ctx context.Context) error {
 	}
 	hostinfo.SetDeviceModel(deviceModel)
 	defer func() {
-        if r := recover(); r != nil {
-            // Log directly to appCtx since normal logging might not be set up
-            stack := string(debug.Stack())
-            a.appCtx.Log("BACKEND", fmt.Sprintf("PANIC in runBackend: %v\n%s", r, stack))
-        }
-    }()
+		if r := recover(); r != nil {
+			// Log directly to appCtx since normal logging might not be set up
+			stack := string(debug.Stack())
+			a.appCtx.Log("BACKEND", fmt.Sprintf("PANIC in runBackend: %v\n%s", r, stack))
+		}
+	}()
 
 	type configPair struct {
 		rcfg *router.Config
@@ -177,7 +177,7 @@ func (a *App) runBackend(ctx context.Context) error {
 			state = s
 			if state >= ipn.Starting && vpnService.service != nil && b.isConfigNonNilAndDifferent(cfg.rcfg, cfg.dcfg) {
 				log.Printf("rundBackend 2.1 state >= ipn.Starting=%v vpnService.service != nil=%v b.isConfigNonNilAndDifferent=%v",
-					 state, vpnService.service != nil, b.isConfigNonNilAndDifferent(cfg.rcfg, cfg.dcfg))
+					state, vpnService.service != nil, b.isConfigNonNilAndDifferent(cfg.rcfg, cfg.dcfg))
 				// On state change, check if there are router or config changes requiring an update to VPNBuilder
 				if err := b.updateTUN(cfg.rcfg, cfg.dcfg); err != nil {
 					log.Println("rundBackend 2.2")
@@ -266,7 +266,7 @@ func (a *App) runBackend(ctx context.Context) error {
 			log.Println("rundBackend 17")
 			go b.tunnelUpdatedHandler()
 			log.Println("rundBackend 18")
-		// __END_CYLONIX_MOD__
+			// __END_CYLONIX_MOD__
 		}
 	}
 }
@@ -393,3 +393,13 @@ func (a *App) closeVpnService(err error, b *backend) {
 	vpnService.service.DisconnectVPN()
 	vpnService.service = nil
 }
+
+// __BEGIN_CYLONIX_MOD__
+func (a *App) GetTailDropFilePath(filename string) (string, error) {
+	if a.backend == nil {
+		return "", fmt.Errorf("backend not initialized")
+	}
+	return a.backend.GetFilePath(filename)
+}
+
+// __END_CYLONIX_MOD__
