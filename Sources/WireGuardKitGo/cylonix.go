@@ -233,20 +233,11 @@ func cylonixInit() error {
 	}
 
 	// Check to enable tailchat
-	v, err := store.ReadState(tailchatStateKey)
-	if err != nil && !errors.Is(err, ipn.ErrStateNotExist) {
-		return fmt.Errorf("failed to get tailchat enabled state: %w", err)
+	if err := checkAndStartTailchat(); err != nil {
+		// Log the error but continue
+		clogf("Failed to check and start tailchat: %v", err)
 	}
-	if len(v) > 0 {
-		clogf("tailchat is enabled")
-		startArgs := tailchat.StartArgs{}
-		if err := json.Unmarshal(v, &startArgs); err != nil {
-			return fmt.Errorf("failed to parse tailchat start args: %w", err)
-		}
-		if err := tailchat.Start(startArgs); err != nil {
-			return fmt.Errorf("failed to start tailchat: %w", err)
-		}
-	}
+
 	// Check to enable always use relay
 	alwaysUseRelayEnabledStateKey, err := store.GetBoolState(alwaysUseRelayEnabledStateKey)
 	if err != nil {
@@ -270,6 +261,49 @@ func cylonixInit() error {
 		filesWaitingManager = app.WatchAwaitingFiles(handleFilesWaiting)
 	}()
 	clogf("%v libtailscale started %v", dashes, dashes)
+	return nil
+}
+
+func checkAndStartTailchat() error {
+	v, err := store.ReadState(tailchatStateKey)
+	if err != nil && !errors.Is(err, ipn.ErrStateNotExist) {
+		return fmt.Errorf("failed to get tailchat enabled state: %w", err)
+	}
+	if len(v) <= 0 {
+		clogf("Tailchat is not enabled")
+		return nil // Tailchat is not enabled
+	}
+	clogf("Tailchat is enabled")
+	startArgs := tailchat.StartArgs{}
+	if err := json.Unmarshal(v, &startArgs); err != nil {
+		return fmt.Errorf("failed to parse tailchat start args: %w", err)
+	}
+	dir, err := getSharedAppGroupDir()
+	if err != nil {
+		return fmt.Errorf("failed to get shared app group dir for tailchat: %w", err)
+	}
+	cacheDir := startArgs.CacheDir
+	if !strings.HasPrefix(cacheDir, dir) {
+		clogf("Tailchat cache dir %q does not start with shared app group dir %q. Using shared app group dir", cacheDir, dir)
+		s := strings.Split(cacheDir, "/")
+		d := strings.Split(dir, "/")
+		if len(s) <= len(d) {
+			return fmt.Errorf("tailchat cache dir %q is not a subdirectory of shared app group dir %q", cacheDir, dir)
+		}
+		cacheDir = filepath.Join(dir, strings.Join(s[len(d):], "/"))
+		startArgs.CacheDir = cacheDir
+		clogf("Using new tailchat cache dir %q", cacheDir)
+		v, err := json.Marshal(startArgs)
+		if err != nil {
+			return fmt.Errorf("error encoding tailchat args: %w", err)
+		}
+		if err := store.WriteState(tailchatStateKey, v); err != nil {
+			return fmt.Errorf("error writing tailchat state: %w", err)
+		}
+	}
+	if err := tailchat.Start(startArgs); err != nil {
+		return fmt.Errorf("failed to start tailchat: %w", err)
+	}
 	return nil
 }
 
