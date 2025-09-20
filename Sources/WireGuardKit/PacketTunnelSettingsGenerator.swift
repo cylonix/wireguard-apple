@@ -21,6 +21,7 @@ class PacketTunnelSettingsGenerator {
     let excludedRoutes: [IPAddressRange]
     let dns: [String]
     let dnsSearch: [String]?
+    let defaultMTU: UInt16?
 
     init(tunnelConfiguration: TunnelConfiguration, resolvedEndpoints: [Endpoint?]) {
         self.tunnelConfiguration = tunnelConfiguration
@@ -30,9 +31,11 @@ class PacketTunnelSettingsGenerator {
         self.excludedRoutes = []
         self.dns = []
         self.dnsSearch = []
+        self.defaultMTU = nil
     }
 
     init() {
+        self.defaultMTU = nil
         self.tunnelConfiguration = nil
         self.resolvedEndpoints = []
         self.interfaceAddresses = []
@@ -42,7 +45,7 @@ class PacketTunnelSettingsGenerator {
         self.dns = ["8.8.8.8", "8.8.4.4", "9.9.9.9", "223.5.5.5", "223.6.6.6", "114.114.114.114"]
     }
 
-    init(addresses: [String]?, routes: [String]?, excludedRoutes: [String]?, dns: [String]?, dnsSearch: [String]?) {
+    init(addresses: [String]?, routes: [String]?, excludedRoutes: [String]?, dns: [String]?, dnsSearch: [String]?, mtu: UInt16?) {
         self.dns = dns ??  ["8.8.8.8", "8.8.4.4", "9.9.9.9", "223.5.5.5", "223.6.6.6", "114.114.114.114"]
         self.dnsSearch = dnsSearch
         var interfaceAddresses: [IPAddressRange] = []
@@ -75,6 +78,7 @@ class PacketTunnelSettingsGenerator {
         self.excludedRoutes = tunnelExcludedRoutes
         self.tunnelConfiguration = nil
         self.resolvedEndpoints = []
+        self.defaultMTU = mtu
     }
 
     private func getInterfaceAddresses() -> [IPAddressRange] {
@@ -201,7 +205,7 @@ class PacketTunnelSettingsGenerator {
             networkSettings.dnsSettings = dnsSettings
         }
 
-        let mtu = tunnelConfiguration?.interface.mtu ?? 0
+        let mtu = tunnelConfiguration?.interface.mtu ?? self.defaultMTU ?? 0
 
         /* 0 means automatic MTU. In theory, we should just do
          * `networkSettings.tunnelOverheadBytes = 80` but in

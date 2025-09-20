@@ -43,7 +43,7 @@ private enum State {
 }
 
 struct WireGuardNetworkSettingsConfig: Codable {
-    var mtu: Int?
+    var mtu: UInt16?
     var addresses: [String]?
     var routes: [String]?
     var excludedRoutes: [String]?
@@ -721,7 +721,8 @@ extension WireGuardAdapter {
                 routes: config.routes,
                 excludedRoutes: config.excludedRoutes,
                 dns: config.dnsServers,
-                dnsSearch: config.searchDomains
+                dnsSearch: config.searchDomains,
+                mtu: config.mtu
             )
             logHandler(.verbose, "setNetworkSettingsWithJsonString: set last generator to \(generator) with config \(config) jsonString \(jsonString)")
             lastNetworkSettingsGenerator = generator
