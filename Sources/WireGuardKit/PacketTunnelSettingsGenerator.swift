@@ -205,7 +205,7 @@ class PacketTunnelSettingsGenerator {
             networkSettings.dnsSettings = dnsSettings
         }
 
-        let mtu = tunnelConfiguration?.interface.mtu ?? self.defaultMTU ?? 0
+        let mtu = tunnelConfiguration?.interface.mtu ?? self.defaultMTU ?? 1280 // __CYLONIX_MOD__
 
         /* 0 means automatic MTU. In theory, we should just do
          * `networkSettings.tunnelOverheadBytes = 80` but in
