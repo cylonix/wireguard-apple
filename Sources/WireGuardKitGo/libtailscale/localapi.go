@@ -24,7 +24,7 @@ import (
 	"tailscale.com/ipn"
 )
 
-// CallLocalAPI is the method for making localapi calls from Kotlin. It calls
+// CallLocalAPI is the method for making local api calls from Kotlin. It calls
 // the given endpoint on the local API using the given HTTP method and
 // optionally sending the given body. It returns a Response representing the
 // result of the call and an error if the call could not be completed or the
@@ -82,18 +82,18 @@ func (app *App) CallLocalAPIMultipart(timeoutMillis int, method, endpoint string
 			}
 			_, err = io.Copy(p, adaptInputStream(part.Body))
 			if err != nil {
-				resultCh <- fmt.Errorf("Copy: %w", err)
+				resultCh <- fmt.Errorf("copy error: %w", err)
 				return
 			}
 		}
 
 		err := mw.Close()
 		if err != nil {
-			resultCh <- fmt.Errorf("Close MultipartWriter: %w", err)
+			resultCh <- fmt.Errorf("failed to close MultipartWriter: %w", err)
 		}
 		err = w.Close()
 		if err != nil {
-			resultCh <- fmt.Errorf("Close Writer: %w", err)
+			resultCh <- fmt.Errorf("failed to close writer: %w", err)
 		}
 	}()
 

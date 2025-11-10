@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
+	"strconv"
 
 	"tailscale.com/ipn"
 )
@@ -79,36 +79,39 @@ func (s *stateStore) read(key string) ([]byte, error) {
 		if errors.Is(err, errKeychainItemNotFound) {
 			return nil, nil
 		}
-		log.Printf("Failed to read state @%q: %v", key, err)
+		clogf("Failed to read state @%q: %v", key, err)
 		return nil, fmt.Errorf("failed to read state: %w", err)
 	}
 	data, err = base64.RawStdEncoding.DecodeString(string(b64))
 	if err != nil {
-		log.Printf("Failed to decode state for key @%q value=%q: %v", key, shortString(string(b64)), err)
+		clogf("Failed to decode state for key @%q value=%q: %v", key, shortString(string(b64)), err)
 		return nil, fmt.Errorf("failed to decode state: %w", err)
 	}
-	log.Printf("Store read: %q=%q", key, shortString(string(data)))
+	clogf("Store read: %q=%q", key, shortString(string(data)))
 	return data, err
 }
 
 func (s *stateStore) write(key string, value []byte) error {
 	bs64 := base64.RawStdEncoding.EncodeToString(value)
 	if err := setKeychainItem(key, bs64); err != nil {
-		log.Printf("Failed to write state for key @%q value=%q: %v", key, shortString(string(value)), err)
+		clogf("Failed to write state for key @%q value=%q: %v", key, shortString(string(value)), err)
 		return fmt.Errorf("failed to write state: %w", err)
 	}
 	if _, err := getKeychainItem(key); err != nil {
 		// Could be due to set/get race condition. Ignore the error for now.
-		log.Printf("Ignored error: failed to get the key @%q just set: %v", key, err)
+		clogf("Ignored error: failed to get the key @%q just set: %v", key, err)
 	}
-	log.Printf("Store written: %q=%q", key, shortString(string(value)))
+	clogf("Store written: %q=%q", key, shortString(string(value)))
 	return nil
 }
 
 func (s *stateStore) GetBoolState(key ipn.StateKey) (bool, error) {
 	v, err := s.ReadState(key)
 	if err == nil {
-		return len(v) > 0 && string(v) == "true", nil
+		if len(v) <= 0 {
+			return false, nil
+		}
+		return strconv.ParseBool(string(v))
 	}
 	if errors.Is(err, ipn.ErrStateNotExist) {
 		return false, nil

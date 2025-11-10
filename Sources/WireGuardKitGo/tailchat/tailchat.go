@@ -146,11 +146,24 @@ func Start(args StartArgs) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go manageAcceptLoop(ctx, "main", port, lc, handleConnection)
-	go manageAcceptLoop(ctx, "subscriber", subscriberPort, lc, handleSubscriberConnection)
+	main_err_chan := make(chan error, 1)
+	sub_err_chan := make(chan error, 1)
+	go manageAcceptLoop(ctx, "main", port, lc, handleConnection, main_err_chan)
+	go manageAcceptLoop(ctx, "subscriber", subscriberPort, lc, handleSubscriberConnection, sub_err_chan)
 
-	isRunning = true
+	err := <-main_err_chan
+	if err != nil {
+		cancel()
+		return err
+	}
+	err = <-sub_err_chan
+	if err != nil {
+		cancel()
+		return err
+	}
+
 	stopChannel = make(chan struct{})
+	isRunning = true
 	go func() {
 		<-stopChannel
 		logger.Println("Shutting down server...")
@@ -160,19 +173,34 @@ func Start(args StartArgs) error {
 	return nil
 }
 
-func manageAcceptLoop(ctx context.Context, name string, port int, lc net.ListenConfig, handler func(net.Conn)) {
+func manageAcceptLoop(ctx context.Context, name string, port int, lc net.ListenConfig, handler func(net.Conn), errChan chan<- error) {
 	backoff := time.Second
 	maxBackoff := time.Second * 30
+	portInUseRetries := 0
+	maxPortInUseRetries := 2
 
 	for wantRunning {
 		listener, err := lc.Listen(ctx, "tcp", fmt.Sprintf(":%d", port))
 		if err != nil {
 			logger.Printf("Error creating listener %v: %v\n", name, err)
 			notifyTailchatApp(ChatStatusError, "Error creating listener: "+err.Error())
+			// Don't backoff and retry forever if the port is busy.
+			if isPortInUseError(err) {
+				portInUseRetries++
+				if portInUseRetries >= maxPortInUseRetries {
+					errChan <- fmt.Errorf("port %d is in use after %d retries: %v", port, portInUseRetries, err)
+					if isRunning {
+						Stop()
+					}
+					return
+				}
+			}
 			time.Sleep(backoff)
-			backoff = min(backoff*2, maxBackoff)
+			backoff = minDuration(backoff*2, maxBackoff)
 			continue
 		}
+		portInUseRetries = 0 // Reset retries on successful listener creation
+		errChan <- nil       // Notify successful listener creation
 
 		notifyTailchatApp(ChatStatusOK, "Listener created on port "+strconv.Itoa(port))
 		logger.Printf("Started %s listener on port %d\n", name, port)
@@ -188,36 +216,72 @@ func manageAcceptLoop(ctx context.Context, name string, port int, lc net.ListenC
 			}
 
 			time.Sleep(backoff)
-			backoff = min(backoff*2, maxBackoff)
+			backoff = minDuration(backoff*2, maxBackoff)
 		}
 	}
 }
 
+// Helper function to check if error is due to port being in use
+func isPortInUseError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for common "address already in use" error messages
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "address already in use") ||
+		strings.Contains(errStr, "bind: address already in use") ||
+		strings.Contains(errStr, "port is already allocated") ||
+		strings.Contains(errStr, "only one usage of each socket address")
+}
 func acceptLoop(ctx context.Context, listener net.Listener, handler func(net.Conn)) error {
 	for {
+		// Create a channel to receive accept results
+		acceptChan := make(chan struct {
+			conn net.Conn
+			err  error
+		}, 1)
+
+		// Start accept in a goroutine
+		go func() {
+			conn, err := listener.Accept()
+			select {
+			case acceptChan <- struct {
+				conn net.Conn
+				err  error
+			}{conn: conn, err: err}:
+			case <-ctx.Done():
+				// Context cancelled while accepting, close the connection if we got one
+				if conn != nil {
+					conn.Close()
+				}
+			}
+		}()
+
+		// Wait for either accept result or context cancellation
 		select {
 		case <-ctx.Done():
+			logger.Printf("Accept loop cancelled by context\n")
 			return fmt.Errorf("context cancelled")
-		default:
-			conn, err := listener.Accept()
-			if err != nil {
-				if err, ok := err.(net.Error); ok && err.Timeout() {
+		case result := <-acceptChan:
+			if result.err != nil {
+				if err, ok := result.err.(net.Error); ok && err.Timeout() {
 					continue
 				}
 				// Return error to trigger listener recreation
-				return fmt.Errorf("accept failed: %w", err)
+				return fmt.Errorf("accept failed: %w", result.err)
 			}
 
-			if conn != nil {
-				logger.Printf("Accepted connection from %v\n", conn.RemoteAddr())
-				go handler(conn)
+			if result.conn != nil {
+				logger.Printf("Accepted connection from %v\n", result.conn.RemoteAddr())
+				go handler(result.conn)
 			}
 		}
 	}
 }
 
 // Helper function for time.Duration comparison
-func min(a, b time.Duration) time.Duration {
+func minDuration(a, b time.Duration) time.Duration {
 	if a < b {
 		return a
 	}
@@ -279,6 +343,9 @@ func Stop() {
 	connections = make(map[net.Conn]struct{})
 	connectionMutex.Unlock()
 	logger.Println("All connections cleared")
+
+	// Give listeners time to close gracefully
+	time.Sleep(100 * time.Millisecond)
 }
 
 func messageShortString(message string) string {
@@ -428,7 +495,7 @@ func handleSubscriberConnection(conn net.Conn) {
 				return
 			default:
 				// Read from the connection with a timeout
-				logger.Printf("Waiting for ACK from subscriber %v\n", remote)
+				logger.Printf("Reading from subscriber %v\n", remote)
 				conn.SetReadDeadline(time.Now().Add(ackTimeout)) // Set a timeout to prevent blocking
 				n, err := conn.Read(buffer)
 				if err != nil {

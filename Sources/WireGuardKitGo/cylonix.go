@@ -33,8 +33,7 @@ import (
 const (
 	dashes = "__________________________"
 
-	alwaysUseRelayEnabledStateKey = ipn.StateKey("_always_use_relay_enabled")
-	tailchatStateKey              = ipn.StateKey("_tailchat")
+	tailchatStateKey = ipn.StateKey("_tailchat")
 
 	sendFilesToPeerCmd = "send_files_to_peer"
 )
@@ -239,15 +238,24 @@ func cylonixInit() error {
 	}
 
 	// Check to enable always use relay
-	alwaysUseRelayEnabledStateKey, err := store.GetBoolState(alwaysUseRelayEnabledStateKey)
+	// Read from libtailscale store since this state is managed by
+	// local api which actually double base64 encoded the value.
+	v, err := libtailscale.ReadState(a, ipn.AlwaysUseRelayEnabledKey)
 	if err != nil {
-		return fmt.Errorf("failed to get always use relay enabled state: %w", err)
-	}
-	if alwaysUseRelayEnabledStateKey {
-		clogf("always use relay is enabled")
-		setAlwaysUseRelay()
+		clogf("failed to get always use relay enabled state: %v", err)
+		// Ignore error.
 	} else {
-		clogf("always use relay is not enabled")
+		alwaysUseRelayEnabled, err := strconv.ParseBool(string(v))
+		if err != nil {
+			clogf("failed to parse bool '%v' for alwaysRelayEnabled", string(v))
+			// Ignore error.
+		}
+		if alwaysUseRelayEnabled {
+			clogf("always use relay is enabled: '%v'", string(v))
+			setAlwaysUseRelay()
+		} else {
+			clogf("always use relay is not enabled: '%v'", string(v))
+		}
 	}
 
 	app = libtailscale.Start(dataDir, tailDropDir, a)
@@ -624,9 +632,27 @@ func handleCommand(cmd, args string) string {
 		}
 		return "Success"
 	case "ping":
-		result, err := client.Ping(args)
+		list := strings.Split(args, " ")
+		ip := list[0]
+		pingType := "disco"
+		if len(list) == 2 {
+			pingType = list[1]
+		}
+		result, err := client.Ping(ip, pingType)
 		if err != nil {
-			return fmt.Sprintf("Error pinging: %v", err)
+			return fmt.Sprintf("Error pinging %v (%v): %v", ip, pingType, err)
+		}
+		return result
+	case "dns_query":
+		list := strings.Split(args, " ")
+		name := list[0]
+		queryType := ""
+		if len(list) == 2 {
+			queryType = list[1]
+		}
+		result, err := client.DNSQuery(name, queryType)
+		if err != nil {
+			return fmt.Sprintf("Error querying %v (type=%v): %v", name, queryType, err)
 		}
 		return result
 	case "start_tailchat":
@@ -710,20 +736,9 @@ func handleCommand(cmd, args string) string {
 		if args == "" {
 			return "Error: no arguments provided"
 		}
-		kvs, err := parseKeyValue(args)
-		if err != nil {
-			return fmt.Sprintf("Error parsing arguments: %v", err)
-		}
-		clogf("Set env knob: %v", kvs)
-		for k, v := range kvs {
-			envknob.Setenv(k, v)
-		}
-		// Some env knobs need follow up actions
-		if v, ok := kvs["TS_DEBUG_ALWAYS_USE_DERP"]; ok {
-			if err := onEnvknobSetAlwaysUseRelay(v, client); err != nil {
-				return fmt.Sprintf("Error setting TS_DEBUG_ALWAYS_USE_DERP: %v", err)
-			}
-			clogf("TS_DEBUG_ALWAYS_USE_DERP set to %v", v)
+		clogf("Set env knob: %v", args)
+		if err := client.SetEnvKnob(args); err != nil {
+			return fmt.Sprintf("Error setting env knobs: %v", err)
 		}
 		return "Success"
 	case "get_env_knob":
@@ -774,31 +789,20 @@ func handleCommand(cmd, args string) string {
 		log.Printf("Setting DNS config for interface %s: %s", interfaceName, dnsConfig)
 		libtailscale.OnDNSConfigChanged(interfaceName)
 		return "Success: DNS config set for " + interfaceName
+	case "add_del_cap":
+		argsSlice := strings.Split(args, " ")
+		if len(argsSlice) != 2 {
+			return "Error: insufficient arguments for add_del_cap"
+		}
+		cap := argsSlice[0]
+		op := argsSlice[1]
+		if err := client.AddDelNodeCapability(cap, op); err != nil {
+			return "Error: " + err.Error()
+		}
+		return "Success"
 	default:
 		return fmt.Sprintf("Error: unknown command: %v", cmd)
 	}
-}
-
-func onEnvknobSetAlwaysUseRelay(setting string, client *libtailscale.Client) error {
-	on, err := strconv.ParseBool(setting)
-	if err != nil {
-		return fmt.Errorf("failed to parse setting '%q': %w", setting, err)
-	}
-	if err := store.SetBoolState(alwaysUseRelayEnabledStateKey, on); err != nil {
-		return fmt.Errorf("failed to store state: %w", err)
-	}
-	if client != nil {
-		clogf("Rebinding for alwaysUserRelay(%v)", on)
-		if err := client.DebugRebind(); err != nil {
-			return fmt.Errorf("failed to rebind for alwaysUserRelay(%v): %w", on, err)
-		}
-		clogf("Rebinding DONE. Re-stunning for alwaysUserRelay(%v)", on)
-		if err := client.DebugReStun(); err != nil {
-			return fmt.Errorf("failed to re-stun for alwaysUserRelay(%v): %w", on, err)
-		}
-		clogf("Re-stunning DONE for alwaysUserRelay(%v)", on)
-	}
-	return nil
 }
 
 func getCmdTimeout(cmd string) time.Duration {

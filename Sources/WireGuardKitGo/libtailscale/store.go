@@ -89,7 +89,7 @@ func (s *stateStore) read(key string) ([]byte, error) {
 	// Ignore base64 decoding errors for now.
 	v, err := base64.RawStdEncoding.DecodeString(b64)
 	if err != nil {
-		s.appCtx.Log("stateStore", "base64 decode error: "+err.Error() + " key="+key +" value="+b64)
+		s.appCtx.Log("stateStore", "base64 decode error: "+err.Error()+" key="+key+" value="+b64)
 		return nil, nil
 	}
 	return v, nil
@@ -99,3 +99,13 @@ func (s *stateStore) write(key string, value []byte) error {
 	bs64 := base64.RawStdEncoding.EncodeToString(value)
 	return s.appCtx.EncryptToPref(key, bs64)
 }
+
+// __BEGIN_CYLONIX_ADD__
+func ReadState(appCtx AppContext, id ipn.StateKey) ([]byte, error) {
+	s := stateStore{
+		appCtx: appCtx,
+	}
+	return s.ReadState(id)
+}
+
+// __END_CYLONIX_ADD__

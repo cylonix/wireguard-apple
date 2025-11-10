@@ -11,14 +11,18 @@ import (
 	"os"
 	"sync/atomic"
 
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 )
 
 const (
+	endpointCap               = "cap"
 	endpointDebug             = "debug"
 	endpointDebugLog          = "debug-log"
 	endpointBugReport         = "bugreport"
+	endpointDNSQuery          = "dns-query"
+	endpointEnvKnob           = "envknob"
 	endpointPrefs             = "prefs"
 	endpointFileTargets       = "file-targets"
 	endpointUploadMetrics     = "upload-client-metrics"
@@ -45,6 +49,14 @@ type Client struct {
 
 func NewClient(app Application) *Client {
 	return &Client{app: app}
+}
+
+func (c *Client) AddDelNodeCapability(cap, op string) error {
+	return c.post(endpointCap+"?cap="+url.QueryEscape(cap)+"&op="+url.QueryEscape(op), 5000, nil, nil)
+}
+
+func (c *Client) SetEnvKnob(setting string) error {
+	return c.post(fmt.Sprintf("%s?env=%s", endpointEnvKnob, url.QueryEscape(setting)), 5000, nil, nil)
 }
 
 func (c *Client) Start(optionsJsonString string) error {
@@ -77,14 +89,32 @@ func (c *Client) SwitchProfile(profile ipn.ProfileID) error {
 	return c.post(endpointProfiles+url.PathEscape(string(profile)), 0, nil, nil)
 }
 
-func (c *Client) Ping(ip string) (string, error) {
+func (c *Client) Ping(ip, pingType string) (string, error) {
 	result := &ipnstate.PingResult{}
-	if err := c.post(endpointPing+"?ip="+url.QueryEscape(ip)+"&type=disco", 2000, nil, result); err != nil {
-		result.Err = err.Error()
+	if err := c.post(
+		endpointPing+"?ip="+url.QueryEscape(ip)+"&type="+pingType,
+		2000, nil, result,
+	); err != nil {
+		result.Err = fmt.Sprintf("PING err: %v: %v", pingType, err)
 	}
 	v, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("marshaling ping result: %w", err)
+	}
+	return string(v), nil
+}
+
+func (c *Client) DNSQuery(name, queryType string) (string, error) {
+	result := &apitype.DNSQueryResponse{}
+	if err := c.get(
+		endpointDNSQuery+"?name="+url.QueryEscape(name)+"&type="+url.QueryEscape(queryType),
+		result,
+	); err != nil {
+		return "", fmt.Errorf("failed to query dns err: %v: %w", queryType, err)
+	}
+	v, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("marshaling query response: %w", err)
 	}
 	return string(v), nil
 }
@@ -314,7 +344,10 @@ func (c *Client) post(path string, timeout int, body []byte, result interface{})
 		return fmt.Errorf("calling local API: %w", err)
 	}
 	err = handleResponse(resp, result)
-	log.Printf("POST: %v err=%v", path, err)
+	if err != nil {
+		log.Printf("POST: %v err=%v", path, err)
+		err = fmt.Errorf("failed to handle %v response: %w", path, err)
+	}
 	return err
 }
 

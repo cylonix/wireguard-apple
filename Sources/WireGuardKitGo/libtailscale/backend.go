@@ -308,7 +308,8 @@ func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, stor
 	b.netMon = netMon
 	b.setupLogs(dataDir, logID, logf, sys.HealthTracker())
 	dialer := new(tsdial.Dialer)
-	b.devices.SetDialer(dialer) // __CYLONIX_MOD__
+	dialer.Logf = logf
+	b.devices.SetDialer(dialer) // __CYLONIX_ADD__
 	vf := &VPNFacade{
 		SetBoth:           b.setCfg,
 		GetBaseConfigFunc: b.getDNSBaseConfig,
@@ -323,12 +324,14 @@ func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, stor
 		NetMon:         b.netMon,
 		HealthTracker:  sys.HealthTracker(),
 		Metrics:        sys.UserMetricsRegistry(),
+		ControlKnobs:   sys.ControlKnobs(), // __CYLONIX_ADD__
 		DriveForLocal:  driveimpl.NewFileSystemForLocal(logf),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("runBackend: NewUserspaceEngine: %v", err)
 	}
 	sys.Set(engine)
+	b.devices.SetEngine(engine) // __CYLONIX_ADD__
 	b.logIDPublic = logID.Public()
 	ns, err := netstack.Create(logf, sys.Tun.Get(), engine, sys.MagicSock.Get(), dialer, sys.DNSManager.Get(), sys.ProxyMapper())
 	if err != nil {
@@ -394,7 +397,7 @@ func (a *App) closeVpnService(err error, b *backend) {
 	vpnService.service = nil
 }
 
-// __BEGIN_CYLONIX_MOD__
+// __BEGIN_CYLONIX_ADD__
 func (a *App) GetTailDropFilePath(filename string) (string, error) {
 	if a.backend == nil {
 		return "", fmt.Errorf("backend not initialized")
@@ -402,4 +405,4 @@ func (a *App) GetTailDropFilePath(filename string) (string, error) {
 	return a.backend.GetFilePath(filename)
 }
 
-// __END_CYLONIX_MOD__
+// __END_CYLONIX_ADD__
