@@ -832,7 +832,7 @@ extension WireGuardAdapter {
                 let fileCount = files.count
                 let title = "Files Received"
                 let body = fileCount == 1
-                    ? "You received a new file"
+                    ? "You received a new file \((files.first?["Name"] as? String) ?? "*unnamed*")"
                     : "You received \(fileCount) new files"
 
                 wg_log(.info, message: "Sending User notification of Received \(fileCount) files")
