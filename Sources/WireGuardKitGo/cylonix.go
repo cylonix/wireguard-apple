@@ -624,6 +624,13 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error add profile: %v", err)
 		}
 		return "Success"
+	case "delete_profile":
+		id := ipn.ProfileID(args)
+		err := client.DeleteProfile(id)
+		if err != nil {
+			return fmt.Sprintf("Error delete profile: %v", err)
+		}
+		return "Success"
 	case "switch_profile":
 		id := ipn.ProfileID(args)
 		err := client.SwitchProfile(id)

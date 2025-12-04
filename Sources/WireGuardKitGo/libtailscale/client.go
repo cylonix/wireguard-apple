@@ -89,6 +89,10 @@ func (c *Client) SwitchProfile(profile ipn.ProfileID) error {
 	return c.post(endpointProfiles+url.PathEscape(string(profile)), 0, nil, nil)
 }
 
+func (c *Client) DeleteProfile(profile ipn.ProfileID) error {
+	return c.delete(endpointProfiles+url.PathEscape(string(profile)), nil, nil)
+}
+
 func (c *Client) Ping(ip, pingType string) (string, error) {
 	result := &ipnstate.PingResult{}
 	if err := c.post(
