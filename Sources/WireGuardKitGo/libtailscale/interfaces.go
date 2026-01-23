@@ -205,6 +205,6 @@ func SendLog(logstr []byte) {
 		// Successfully sent log
 	default:
 		// Channel is full, log not sent
-		log.Printf("Log %v not sent", logstr) // missing argument in original code
+		log.Printf("Log %v not sent", string(logstr)) // missing argument in original code
 	}
 }
