@@ -19,7 +19,7 @@ class NetworkMonitor {
     }
 
     init() {
-        monitor = NWPathMonitor(requiredInterfaceType: .other)
+        monitor = NWPathMonitor()
     }
 
     deinit {

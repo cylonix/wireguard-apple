@@ -12,7 +12,7 @@ extension FileManager {
             #if DEBUG
                 if let id = Bundle.main.object(forInfoDictionaryKey: "com.wireguard.macos.debug.app_group_id") as? String {
                     if id != "" {
-                        wg_log(.info, message: "Using debug app group ID \(id)")
+                        //wg_log(.info, message: "Using debug app group ID \(id)")
                         return id
                     }
                 }

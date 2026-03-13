@@ -82,6 +82,25 @@ func cylonixVersion() string {
 	return "Cylonix " + version.Long()
 }
 
+// bumpCylonixBackendSockets triggers a magicsock rebind and STUN re-discovery on
+// the Cylonix backend. This is the equivalent of wgBumpSockets for the raw
+// wireguard-go backend: after a network path change, the UDP sockets need to be
+// rebound to the new interface so the ReceiveIPv4/IPv6 goroutines don't stall.
+func bumpCylonixBackendSockets() {
+	if app == nil {
+		clogf("bumpCylonixBackendSockets: app not initialized, skipping")
+		return
+	}
+	client := libtailscale.NewClient(app)
+	if err := client.DebugRebind(); err != nil {
+		clogf("bumpCylonixBackendSockets: DebugRebind failed: %v", err)
+	}
+	if err := client.DebugReStun(); err != nil {
+		clogf("bumpCylonixBackendSockets: DebugReStun failed: %v", err)
+	}
+	clogf("bumpCylonixBackendSockets: requested socket rebind and STUN re-discovery")
+}
+
 func filesWaiting(message string) {
 	if _, err := callWgAdapter("filesWaiting", message, 4096); err != nil {
 		clogf("Failed to notify files waiting: %v", err)
@@ -108,6 +127,7 @@ func ipnNotify(message string) error {
 	}
 	return nil
 }
+
 func setNetworkSettings(settings NetworkSettings) error {
 	jsonBytes, err := json.Marshal(settings)
 	if err != nil {
@@ -748,6 +768,27 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error setting env knobs: %v", err)
 		}
 		return "Success"
+	case "set_l2relay_capture":
+		if args == "" {
+			return "Error: no arguments provided"
+		}
+		on, err := strconv.ParseBool(args)
+		if err != nil {
+			return fmt.Sprintf("Error: invalid bool value %q: %v", args, err)
+		}
+		if err := client.SetL2RelayCaptureEnabled(on); err != nil {
+			return fmt.Sprintf("Error setting l2relay capture: %v", err)
+		}
+		return "Success"
+	case "get_l2relay_capture":
+		on, err := client.L2RelayCaptureEnabled()
+		if err != nil {
+			return fmt.Sprintf("Error getting l2relay capture: %v", err)
+		}
+		if on {
+			return "1"
+		}
+		return "0"
 	case "get_env_knob":
 		if args == "" {
 			return "Error: no arguments provided"
@@ -774,7 +815,11 @@ func handleCommand(cmd, args string) string {
 			notifyManager.Stop()
 		}
 		if lastNotify != "" {
-			log.Printf("Last notify: %q", lastNotify)
+			if len(lastNotify) > 500 {
+				log.Printf("Last notify is too long (%d bytes), truncating for log: %q...", len(lastNotify), lastNotify[:500])
+			} else {
+				log.Printf("Last notify: %q", lastNotify)
+			}
 			if err := ipnNotify(lastNotify); err != nil {
 				log.Printf("Failed to send last notify: %v", err)
 				return fmt.Sprintf("Error: failed to send last notify: %v", err)

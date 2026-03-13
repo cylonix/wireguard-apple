@@ -2,6 +2,7 @@
 // Copyright © 2018-2023 WireGuard LLC. All Rights Reserved.
 
 import Foundation
+import Network
 import NetworkExtension
 import UserNotifications
 #if os(macOS)
@@ -482,7 +483,8 @@ public class WireGuardAdapter {
                 // __BEGIN_CYLONIX_MOD__
                 // To workaround an issue of ios where the network settings are interfering with
                 // the network connectivity when cell data is restricted from our APP.
-                do { wg_log(.info, staticMessage: "wgTurnOff: Turn off network settings too.")
+                do {
+                    wg_log(.info, staticMessage: "wgTurnOff: Turn off network settings too.")
                     try self.setNetworkSettings(PacketTunnelSettingsGenerator().generateNetworkSettings())
                 } catch {
                     self.logHandler(.error, "wgTurnOff: Turn off network settings failed: \(error.localizedDescription).")

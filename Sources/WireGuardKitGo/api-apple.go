@@ -266,10 +266,17 @@ func wgGetConfig(tunnelHandle int32) *C.char {
 
 //export wgBumpSockets
 func wgBumpSockets(tunnelHandle int32) {
+	// __BEGIN_CYLONIX_ADD__
+	// For the Cylonix backend, wgBumpSockets is called by Swift's NWPathMonitor
+	// on network path changes. Trigger a magicsock rebind + STUN re-discovery so
+	// the ReceiveIPv4/IPv6 goroutines re-bind to the new interface.
 	if useCylonixBackend {
-		log.Printf("Bump socket called. Ignored")
+		log.Printf("Bump socket called. Triggering magicsock rebind + restun.")
+		go bumpCylonixBackendSockets()
 		return
 	}
+	// __END_CYLONIX_ADD__
+
 	dev, ok := tunnelHandles[tunnelHandle]
 	if !ok {
 		return
@@ -324,6 +331,8 @@ func wgVersion() *C.char {
 	return C.CString("unknown")
 }
 
+// __BEGIN_CYLONIX_ADD__
+//
 //export wgSendCommand
 func wgSendCommand(cmd *C.char, args *C.char) *C.char {
 	// Create a channel for the result
@@ -397,6 +406,8 @@ func callWgAdapter(method, args string, bufSize int) ([]byte, error) {
 	resp = strings.TrimPrefix(resp, "SUCCESS: ")
 	return []byte(resp), nil
 }
+
+// __END_CYLONIX_ADD__
 
 func main() {
 	log.Printf("starting the network extension go routine")

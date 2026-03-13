@@ -286,6 +286,15 @@ func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, stor
 	var logID logid.PrivateID
 	logID.UnmarshalText([]byte("dead0000dead0000dead0000dead0000dead0000dead0000dead0000dead0000"))
 	storedLogID, err := store.read(logPrefKey)
+	if err == nil && storedLogID != nil {
+		err = logID.UnmarshalText([]byte(storedLogID))
+		if err != nil {
+			log.Printf("Failed to unmarshal logID read from store: %v", err)
+		} else {
+			logf("Successfully unmarshaled logID from store: %s", logID.Public())
+		}
+	}
+
 	// In all failure cases we ignore any errors and continue with the dead value above.
 	if err != nil || storedLogID == nil {
 		// Read failed or there was no previous log id.
@@ -297,8 +306,7 @@ func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, stor
 				store.write(logPrefKey, enc)
 			}
 		}
-	} else {
-		logID.UnmarshalText([]byte(storedLogID))
+		log.Printf("Generated new logID: %s (%s), err: %v", logID.Public(), newLogID.Public(), err)
 	}
 
 	netMon, err := netmon.New(logf)
