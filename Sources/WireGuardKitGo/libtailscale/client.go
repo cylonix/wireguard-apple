@@ -42,6 +42,7 @@ const (
 	endpointFilePut           = "file-put/"
 	endpointTailfsServerAddr  = "tailfs/fileserver-address"
 	endpointEnableExitNode    = "set-use-exit-node-enabled"
+	endpointPeerMessageSend   = "peer-message/send"
 )
 
 type Client struct {
@@ -74,6 +75,10 @@ func (c *Client) L2RelayCaptureEnabled() (bool, error) {
 
 func (c *Client) Start(optionsJsonString string) error {
 	return c.post(endpointStart, 0, []byte(optionsJsonString), nil)
+}
+
+func (c *Client) SendPeerMessage(payload []byte) error {
+	return c.post(endpointPeerMessageSend, 15000, payload, nil)
 }
 
 func (c *Client) StartLoginInteractive() error {

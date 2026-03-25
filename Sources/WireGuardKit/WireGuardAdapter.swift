@@ -698,6 +698,8 @@ extension WireGuardAdapter {
                     ret = unretainedSelf.handleChatStatus(arguments)
                 case "filesWaiting":
                     ret = unretainedSelf.handleFilesWaiting(arguments)
+                case "peerMessageEvent":
+                    ret = unretainedSelf.handlePeerMessagingEvent(arguments)
                 default:
                     ret = "ERROR: method \(cmd) not supported"
                 }
@@ -876,6 +878,64 @@ extension WireGuardAdapter {
         return ""
     }
 
+    private func handlePeerMessagingEvent(_ event: String) -> String {
+        let notificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
+        let notificationName = PacketTunnelNotification.peerMessageReceived as CFString
+        guard let containerURL = containerURL() else {
+            wg_log(.error, message: "Failed to get group container URL for peer messaging")
+            return "ERROR: Failed to get group container URL"
+        }
+
+        let coordinator = NSFileCoordinator()
+        var coorError: NSError?
+        coordinator.coordinate(writingItemAt: containerURL, options: .forMerging, error: &coorError) { url in
+            let queueFile = url.appendingPathComponent("peer_messaging_event_queue.json")
+            var queue: [[String: Any]] = []
+
+            if let data = try? Data(contentsOf: queueFile) {
+                queue = (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+            }
+
+            let entry: [String: Any] = [
+                "id": UUID().uuidString,
+                "timestamp": floor(Date().timeIntervalSince1970 * 1_000_000),
+                "notification": event,
+            ]
+            queue.append(entry)
+
+            if queue.count > 200 {
+                queue.removeFirst(queue.count - 200)
+            }
+
+            if let data = try? JSONSerialization.data(withJSONObject: queue) {
+                try? data.write(to: queueFile, options: .atomicWrite)
+            }
+        }
+
+        if let error = coorError {
+            wg_log(.error, message: "Failed to update peer messaging event queue: \(error.localizedDescription)")
+            return "ERROR: Failed to update peer messaging event queue: \(error.localizedDescription)"
+        }
+
+        if let json = try? JSONSerialization.jsonObject(with: Data(event.utf8)) as? [String: Any],
+           let type = json["type"] as? String
+        {
+            if type == "message_received" || type == "approval_requested" {
+                let payload = json["payload"] as? [String: Any]
+                let message = payload?["message"] as? [String: Any]
+                let text = message?["text"] as? String ?? "New peer activity"
+                sendUserNotification(
+                    title: type == "approval_requested" ? "Peer approval needed" : "Peer message",
+                    body: text,
+                    identifier: "peer-messaging-\(UUID().uuidString)"
+                )
+            }
+        }
+
+        CFNotificationCenterPostNotification(notificationCenter, CFNotificationName(notificationName), nil, nil, true)
+        return ""
+    }
+
     private func sendUserNotification(title: String, body: String, identifier: String? = nil) {
         let content = UNMutableNotificationContent()
         content.title = title
@@ -1014,6 +1074,17 @@ extension WireGuardAdapter {
             .deliverImmediately
         )
         wg_log(.info, message: "Listening for Darwin notification: \(tailchatNote)")
+
+        let peerMessageNote = PacketTunnelMessage.peerMessage as CFString
+        CFNotificationCenterAddObserver(
+            center,
+            Unmanaged.passUnretained(self).toOpaque(),
+            packetTunnelDarwinCallback,
+            peerMessageNote,
+            nil,
+            .deliverImmediately
+        )
+        wg_log(.info, message: "Listening for Darwin notification: \(peerMessageNote)")
     }
 
     private func containerURL() -> URL? {

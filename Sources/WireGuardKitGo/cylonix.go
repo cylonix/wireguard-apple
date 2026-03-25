@@ -26,6 +26,7 @@ import (
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/types/logger"
 	"tailscale.com/version"
 )
@@ -116,6 +117,12 @@ func chatsReceived(message string) {
 func chatStatus(message string) {
 	if _, err := callWgAdapter("chatStatus", message, 4096); err != nil {
 		clogf("Failed to notify chat status: %v", err)
+	}
+}
+
+func peerMessageEvent(message string) {
+	if _, err := callWgAdapter("peerMessageEvent", message, 8192); err != nil {
+		clogf("Failed to notify peerMessage event: %v", err)
 	}
 }
 
@@ -244,6 +251,14 @@ func cylonixInit() error {
 	// Verify logging is working
 	clogf("Log output successfully initialized")
 	clogf("%v dataDir: %v %v", dashes, dataDir, dashes)
+	ipnlocal.PeerMessageEventSink = func(event ipnlocal.PeerMessageEvent) error {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("marshal peerMessage event: %w", err)
+		}
+		peerMessageEvent(string(encoded))
+		return nil
+	}
 	store = newStateStore()
 	clogf("%v starting libtailscale %v", dashes, dashes)
 	tailDropDir, err := getPlatformTailDropDir()
@@ -808,6 +823,11 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error sending files to peer: %v", err)
 		}
 		return "Success: " + result
+	case "send_peer_message":
+		if err := client.SendPeerMessage([]byte(args)); err != nil {
+			return fmt.Sprintf("Error sending peerMessage: %v", err)
+		}
+		return "Success"
 	case "watch_notifications":
 		log.Println("Starting notification manager")
 		if notifyManager != nil {
