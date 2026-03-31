@@ -66,6 +66,10 @@ public class WireGuardAdapter {
 
     /// Private queue used to synchronize access to `WireGuardAdapter` members.
     private let workQueue = DispatchQueue(label: "WireGuardAdapterWorkQueue")
+    private let peerMessagingQueue = DispatchQueue(
+        label: "io.cylonix.sase.wireguard.peerMessagingQueue",
+        qos: .userInitiated
+    )
 
     /// Adapter state.
     private var state: State = .stopped
@@ -746,6 +750,16 @@ extension WireGuardAdapter {
         return UserDefaults(suiteName: appGroupId)
     }
 
+    private func notificationPreviewEnabled() -> Bool {
+        guard let defaults = sharedDefaults() else {
+            return true
+        }
+        if defaults.object(forKey: PacketTunnelUserDefaultsKey.notificationPreviewEnabled) == nil {
+            return true
+        }
+        return defaults.bool(forKey: PacketTunnelUserDefaultsKey.notificationPreviewEnabled)
+    }
+
     private func handleIpnNotify(_ notification: String) -> String {
         let notificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
         let notificationName = PacketTunnelNotification.ipnNotify as CFString
@@ -834,10 +848,13 @@ extension WireGuardAdapter {
                let files = json["Files"] as? [[String: Any]]
             {
                 let fileCount = files.count
-                let title = "Files Received"
-                let body = fileCount == 1
-                    ? "You received a new file \((files.first?["Name"] as? String) ?? "*unnamed*")"
-                    : "You received \(fileCount) new files"
+                let previewsEnabled = notificationPreviewEnabled()
+                let title = previewsEnabled ? "Files Received" : "New file received"
+                let body = previewsEnabled
+                    ? (fileCount == 1
+                        ? "You received a new file \((files.first?["Name"] as? String) ?? "*unnamed*")"
+                        : "You received \(fileCount) new files")
+                    : "Open Cylonix to view file details."
 
                 wg_log(.info, message: "Sending User notification of Received \(fileCount) files")
                 sendUserNotification(
@@ -879,61 +896,78 @@ extension WireGuardAdapter {
     }
 
     private func handlePeerMessagingEvent(_ event: String) -> String {
-        let notificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
-        let notificationName = PacketTunnelNotification.peerMessageReceived as CFString
-        guard let containerURL = containerURL() else {
-            wg_log(.error, message: "Failed to get group container URL for peer messaging")
-            return "ERROR: Failed to get group container URL"
-        }
-
-        let coordinator = NSFileCoordinator()
-        var coorError: NSError?
-        coordinator.coordinate(writingItemAt: containerURL, options: .forMerging, error: &coorError) { url in
-            let queueFile = url.appendingPathComponent("peer_messaging_event_queue.json")
-            var queue: [[String: Any]] = []
-
-            if let data = try? Data(contentsOf: queueFile) {
-                queue = (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+        return peerMessagingQueue.sync {
+            let notificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
+            let notificationName = PacketTunnelNotification.peerMessageReceived as CFString
+            guard let containerURL = containerURL() else {
+                wg_log(.error, message: "Failed to get group container URL for peer messaging")
+                return "ERROR: Failed to get group container URL"
             }
 
-            let entry: [String: Any] = [
-                "id": UUID().uuidString,
-                "timestamp": floor(Date().timeIntervalSince1970 * 1_000_000),
-                "notification": event,
-            ]
-            queue.append(entry)
+            wg_log(.info, message: "handlePeerMessagingEvent: received event payload bytes=\(event.lengthOfBytes(using: .utf8))")
+            let coordinator = NSFileCoordinator()
+            var coorError: NSError?
+            coordinator.coordinate(writingItemAt: containerURL, options: .forMerging, error: &coorError) { url in
+                let queueFile = url.appendingPathComponent("peer_messaging_event_queue.json")
+                var queue: [[String: Any]] = []
 
-            if queue.count > 200 {
-                queue.removeFirst(queue.count - 200)
+                if let data = try? Data(contentsOf: queueFile) {
+                    queue = (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+                }
+                wg_log(.info, message: "handlePeerMessagingEvent: queue path=\(queueFile.path) existingCount=\(queue.count)")
+
+                let entry: [String: Any] = [
+                    "id": UUID().uuidString,
+                    "timestamp": floor(Date().timeIntervalSince1970 * 1_000_000),
+                    "notification": event,
+                ]
+                queue.append(entry)
+
+                if queue.count > 200 {
+                    let dropped = queue.count - 200
+                    queue.removeFirst(queue.count - 200)
+                    wg_log(.info, message: "handlePeerMessagingEvent: trimmed peer messaging queue by \(dropped) entries")
+                }
+
+                if let data = try? JSONSerialization.data(withJSONObject: queue) {
+                    try? data.write(to: queueFile, options: .atomicWrite)
+                    wg_log(.info, message: "handlePeerMessagingEvent: wrote queue count=\(queue.count)")
+                } else {
+                    wg_log(.error, message: "handlePeerMessagingEvent: failed to encode queue JSON")
+                }
             }
 
-            if let data = try? JSONSerialization.data(withJSONObject: queue) {
-                try? data.write(to: queueFile, options: .atomicWrite)
+            if let error = coorError {
+                wg_log(.error, message: "Failed to update peer messaging event queue: \(error.localizedDescription)")
+                return "ERROR: Failed to update peer messaging event queue: \(error.localizedDescription)"
             }
-        }
 
-        if let error = coorError {
-            wg_log(.error, message: "Failed to update peer messaging event queue: \(error.localizedDescription)")
-            return "ERROR: Failed to update peer messaging event queue: \(error.localizedDescription)"
-        }
-
-        if let json = try? JSONSerialization.jsonObject(with: Data(event.utf8)) as? [String: Any],
-           let type = json["type"] as? String
-        {
-            if type == "message_received" || type == "approval_requested" {
-                let payload = json["payload"] as? [String: Any]
-                let message = payload?["message"] as? [String: Any]
-                let text = message?["text"] as? String ?? "New peer activity"
-                sendUserNotification(
-                    title: type == "approval_requested" ? "Peer approval needed" : "Peer message",
-                    body: text,
-                    identifier: "peer-messaging-\(UUID().uuidString)"
-                )
+            if let json = try? JSONSerialization.jsonObject(with: Data(event.utf8)) as? [String: Any],
+               let type = json["type"] as? String
+            {
+                if type == "message_received" || type == "approval_requested" {
+                    let payload = json["payload"] as? [String: Any]
+                    let message = payload?["message"] as? [String: Any]
+                    let previewsEnabled = notificationPreviewEnabled()
+                    let text = previewsEnabled
+                        ? (message?["text"] as? String ?? "New peer activity")
+                        : (type == "approval_requested"
+                            ? "Open Cylonix to review this approval request."
+                            : "Open Cylonix to view this message.")
+                    sendUserNotification(
+                        title: previewsEnabled
+                            ? (type == "approval_requested" ? "Peer approval needed" : "Peer message")
+                            : (type == "approval_requested" ? "New approval request" : "New peer message"),
+                        body: text,
+                        identifier: "peer-messaging-\(UUID().uuidString)"
+                    )
+                }
             }
-        }
 
-        CFNotificationCenterPostNotification(notificationCenter, CFNotificationName(notificationName), nil, nil, true)
-        return ""
+            wg_log(.info, message: "handlePeerMessagingEvent: posting Darwin notification \(notificationName)")
+            CFNotificationCenterPostNotification(notificationCenter, CFNotificationName(notificationName), nil, nil, true)
+            return ""
+        }
     }
 
     private func sendUserNotification(title: String, body: String, identifier: String? = nil) {

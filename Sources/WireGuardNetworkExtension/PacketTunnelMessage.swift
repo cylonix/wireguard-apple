@@ -25,4 +25,5 @@ enum PacketTunnelUserDefaultsKey {
     static let ipnNotify = "IpnNotify"
     static let peerMessageReceived = "PeerMessageReceived"
     static let autoSavedFilesByTransferID = "AutoSavedFilesByTransferID"
+    static let notificationPreviewEnabled = "NotificationPreviewEnabled"
 }

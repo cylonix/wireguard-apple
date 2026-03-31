@@ -36,9 +36,10 @@ $(GOROOT)/.prepared:
 	@echo "PATH=${PATH}"
 	@echo "REAL_GOROOT=${REAL_GOROOT} REAL_GOROOT_HARD_SET=${REAL_GOROOT_HARD_SET}"
 	[ -n "$(REAL_GOROOT)" ]
-	mkdir -p "$(GOROOT)"
+	mkdir -p "$(GOROOT)" "$(BUILDDIR)"
 	rsync -a --delete --exclude=pkg/obj/go-build "$(REAL_GOROOT)/" "$(GOROOT)/"
-	cat goruntime-*.diff | patch -p1 -f -N -r- -d "$(GOROOT)"
+	chmod -R u+w "$(GOROOT)"
+	TMPDIR="$(BUILDDIR)" cat goruntime-*.diff | TMPDIR="$(BUILDDIR)" patch -p1 -f -N -r- -d "$(GOROOT)"
 	touch "$@"
 
 define libwg-go-a
@@ -55,6 +56,7 @@ endef
 $(foreach ARCH,$(ARCHS),$(eval $(call libwg-go-a,$(ARCH))))
 
 $(DESTDIR)/wireguard-go-version.h: go.mod $(GOROOT)/.prepared
+	@mkdir -p "$(DESTDIR)"
 	 sed -E -n 's/.*golang\.zx2c4\.com\/wireguard +v[0-9.]+-[0-9]+-([0-9a-f]{8})[0-9a-f]{4}.*/#define WIREGUARD_GO_VERSION "\1"/p' "$<" > "$@"
 
 $(DESTDIR)/libwg-go.a: $(foreach ARCH,$(ARCHS),$(BUILDDIR)/libwg-go-$(ARCH).a)
