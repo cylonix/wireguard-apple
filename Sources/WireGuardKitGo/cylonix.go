@@ -824,10 +824,15 @@ func handleCommand(cmd, args string) string {
 		}
 		return "Success: " + result
 	case "send_peer_message":
-		if err := client.SendPeerMessage([]byte(args)); err != nil {
+		var result ipnlocal.PeerMessageSendResult
+		if err := client.SendPeerMessage([]byte(args), &result); err != nil {
 			return fmt.Sprintf("Error sending peerMessage: %v", err)
 		}
-		return "Success"
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Sprintf("Error marshaling peerMessage result: %v", err)
+		}
+		return string(encoded)
 	case "watch_notifications":
 		log.Println("Starting notification manager")
 		if notifyManager != nil {

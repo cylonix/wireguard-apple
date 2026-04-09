@@ -77,8 +77,8 @@ func (c *Client) Start(optionsJsonString string) error {
 	return c.post(endpointStart, 0, []byte(optionsJsonString), nil)
 }
 
-func (c *Client) SendPeerMessage(payload []byte) error {
-	return c.post(endpointPeerMessageSend, 15000, payload, nil)
+func (c *Client) SendPeerMessage(payload []byte, result interface{}) error {
+	return c.post(endpointPeerMessageSend, 15000, payload, result)
 }
 
 func (c *Client) StartLoginInteractive() error {
