@@ -127,9 +127,18 @@ class TunnelsManager {
             }
             for loadedTunnelProvider in loadedTunnelProviders {
                 if let matchingTunnel = self.tunnels.first(where: { loadedTunnelProvider.isEquivalentTo($0) }) {
-                    wg_log(.info, message: "Tunnel '\(matchingTunnel.name)' matches existing. Update and refresh status. Provider changed is \(matchingTunnel.tunnelProvider != loadedTunnelProvider).")
+                    let providerChanged = matchingTunnel.tunnelProvider != loadedTunnelProvider
+                    wg_log(.info, message: "Tunnel '\(matchingTunnel.name)' matches existing. Update status. Provider changed is \(providerChanged).")
                     matchingTunnel.tunnelProvider = loadedTunnelProvider
-                    matchingTunnel.refreshStatus()
+                    // Cylonix: a freshly-loaded NETunnelProviderManager's
+                    // connection.status often reads .invalid/.disconnected
+                    // before the system syncs, which emits a bogus "inactive"
+                    // to Flutter. Genuine status changes arrive via
+                    // .NEVPNStatusDidChange, so only refresh when the provider
+                    // object did not change.
+                    if !providerChanged {
+                        matchingTunnel.refreshStatus()
+                    }
                 } else {
                     // Tunnel was added outside the app
                     if let proto = loadedTunnelProvider.protocolConfiguration as? NETunnelProviderProtocol {

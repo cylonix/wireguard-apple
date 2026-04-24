@@ -50,6 +50,7 @@ struct WireGuardNetworkSettingsConfig: Codable {
     var excludedRoutes: [String]?
     var dnsServers: [String]?
     var searchDomains: [String]?
+    var matchDomains: [String]?
 }
 
 public class WireGuardAdapter {
@@ -730,6 +731,7 @@ extension WireGuardAdapter {
                 excludedRoutes: config.excludedRoutes,
                 dns: config.dnsServers,
                 dnsSearch: config.searchDomains,
+                dnsMatchDomains: config.matchDomains,
                 mtu: config.mtu
             )
             logHandler(.verbose, "setNetworkSettingsWithJsonString: set last generator to \(generator) with config \(config) jsonString \(jsonString)")
@@ -760,7 +762,7 @@ extension WireGuardAdapter {
         return defaults.bool(forKey: PacketTunnelUserDefaultsKey.notificationPreviewEnabled)
     }
 
-    private func handleIpnNotify(_ notification: String) -> String {
+    private func handleIpnNotify(_ envelopeJson: String) -> String {
         let notificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
         let notificationName = PacketTunnelNotification.ipnNotify as CFString
         guard let containerURL = containerURL() else {
@@ -774,6 +776,21 @@ extension WireGuardAdapter {
         } catch {
             wg_log(.error, message: "Failed to create directory '\(containerURL)': \(error.localizedDescription)")
             return "ERROR: Failed to create directory '\(containerURL)': \(error.localizedDescription)"
+        }
+
+        // Decode envelope (caller + enqueuedAtUs + notification). Fall back to
+        // treating the raw input as the notification body for back-compat.
+        var caller = "unknown"
+        var enqueuedAtUs: Double = floor(Date().timeIntervalSince1970 * 1_000_000)
+        var notification = envelopeJson
+        if let envData = envelopeJson.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: envData) as? [String: Any],
+           let n = obj["notification"] as? String {
+            notification = n
+            if let c = obj["caller"] as? String { caller = c }
+            if let ts = obj["enqueuedAtUs"] as? Double { enqueuedAtUs = ts }
+            else if let ts = obj["enqueuedAtUs"] as? Int64 { enqueuedAtUs = Double(ts) }
+            else if let ts = obj["enqueuedAtUs"] as? Int { enqueuedAtUs = Double(ts) }
         }
 
         // Use file coordination for atomic access
@@ -792,7 +809,8 @@ extension WireGuardAdapter {
             // Add new notification
             let entry: [String: Any] = [
                 "id": UUID().uuidString,
-                "timestamp": floor(Date().timeIntervalSince1970 * 1_000_000), // microseconds
+                "timestamp": enqueuedAtUs, // microseconds since epoch
+                "caller": caller,
                 "notification": notification,
             ]
             queue.append(entry)

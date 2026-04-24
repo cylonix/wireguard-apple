@@ -126,10 +126,23 @@ func peerMessageEvent(message string) {
 	}
 }
 
-func ipnNotify(message string) error {
+func ipnNotify(caller, message string) error {
 	lastNotify = message
-	if _, err := callWgAdapter("ipnNotify", message, 4096); err != nil {
-		clogf("Failed to notify ipn: %v", err)
+	envelope, err := json.Marshal(struct {
+		Caller       string `json:"caller"`
+		EnqueuedAtUs int64  `json:"enqueuedAtUs"`
+		Notification string `json:"notification"`
+	}{
+		Caller:       caller,
+		EnqueuedAtUs: time.Now().UnixMicro(),
+		Notification: message,
+	})
+	if err != nil {
+		clogf("Failed to marshal ipn notify envelope: %v", err)
+		return fmt.Errorf("failed to marshal ipn notify envelope: %v", err)
+	}
+	if _, err := callWgAdapter("ipnNotify", string(envelope), 4096); err != nil {
+		clogf("Failed to notify ipn (caller=%s): %v", caller, err)
 		return fmt.Errorf("failed to notify ipn: %v", err)
 	}
 	return nil
@@ -570,7 +583,7 @@ func (c *CylonixAppCtx) OnFatalError(err error) {
 		log.Printf("Failed to marshal notify %#v: %v", n, err)
 		return
 	}
-	if err := ipnNotify(string(v)); err != nil {
+	if err := ipnNotify("fatalError", string(v)); err != nil {
 		log.Printf("Failed to notify ipn: '%q' %v", string(v), err)
 		return
 	}
@@ -582,6 +595,8 @@ func isClientDependantCmd(cmd string) bool {
 	case "start_tailchat", "stop_tailchat", "is_tailchat_running":
 		return false
 	case "log", "get_env_knob", "set_env_knobs", "turn_off_vpn":
+		return false
+	case "debug_state_traces":
 		return false
 	default:
 		return true
@@ -845,7 +860,7 @@ func handleCommand(cmd, args string) string {
 			} else {
 				log.Printf("Last notify: %q", lastNotify)
 			}
-			if err := ipnNotify(lastNotify); err != nil {
+			if err := ipnNotify("watchReplay", lastNotify); err != nil {
 				log.Printf("Failed to send last notify: %v", err)
 				return fmt.Sprintf("Error: failed to send last notify: %v", err)
 			}
@@ -877,6 +892,20 @@ func handleCommand(cmd, args string) string {
 			return "Error: " + err.Error()
 		}
 		return "Success"
+	case "debug_state_traces":
+		// Return the in-memory ring buffer of recent IPN state-send events,
+		// each annotated with a goroutine stack trace captured at send time.
+		// Used to diagnose spurious state=0 (NoState) notifications when the
+		// realtime log has been rolled.
+		if args == "json" {
+			traces := ipnlocal.CylonixGetStateTraces()
+			v, err := json.Marshal(traces)
+			if err != nil {
+				return fmt.Sprintf("Error marshaling state traces: %v", err)
+			}
+			return string(v)
+		}
+		return ipnlocal.CylonixFormatStateTraces()
 	default:
 		return fmt.Sprintf("Error: unknown command: %v", cmd)
 	}
@@ -937,7 +966,7 @@ func notificationMarks() int {
 type notificationCallback struct{}
 
 func (n *notificationCallback) OnNotify(data []byte) error {
-	return ipnNotify(string(data))
+	return ipnNotify("watchNotifications", string(data))
 }
 
 // VPNBuilder collects network settings before applying them all at once
@@ -948,6 +977,7 @@ type VPNBuilder struct {
 	excludeRoutes []netip.Prefix
 	dnsServers    []string
 	searchDomains []string
+	matchDomains  []string
 }
 
 // newVPNBuilder creates a new VPN configuration builder
@@ -1016,10 +1046,16 @@ func (b *VPNBuilder) AddSearchDomain(domain string) error {
 	return nil
 }
 
+// AddMatchDomain adds a DNS match domain for split DNS
+func (b *VPNBuilder) AddMatchDomain(domain string) error {
+	b.matchDomains = append(b.matchDomains, domain)
+	return nil
+}
+
 // Establish applies the configuration and creates the VPN interface
 func (b *VPNBuilder) Establish() (libtailscale.ParcelFileDescriptor, error) {
-	clogf("Establishing VPN with MTU: %d, Addresses: %v, Routes: %v, ExcludeRoutes: %v, DNSServers: %v, SearchDomains: %v",
-		b.mtu, b.addresses, b.routes, b.excludeRoutes, b.dnsServers, b.searchDomains)
+	clogf("Establishing VPN with MTU: %d, Addresses: %v, Routes: %v, ExcludeRoutes: %v, DNSServers: %v, SearchDomains: %v, MatchDomains: %v",
+		b.mtu, b.addresses, b.routes, b.excludeRoutes, b.dnsServers, b.searchDomains, b.matchDomains)
 	// Convert configuration to NetworkSettings format
 	settings := NetworkSettings{
 		MTU:           b.mtu,
@@ -1028,6 +1064,7 @@ func (b *VPNBuilder) Establish() (libtailscale.ParcelFileDescriptor, error) {
 		ExcludeRoutes: b.excludeRoutes,
 		DNSServers:    b.dnsServers,
 		SearchDomains: b.searchDomains,
+		MatchDomains:  b.matchDomains,
 	}
 
 	// Call into Swift to apply the settings
@@ -1056,6 +1093,7 @@ type NetworkSettings struct {
 	ExcludeRoutes []netip.Prefix `json:"excludedRoutes"`
 	DNSServers    []string       `json:"dnsServers"`
 	SearchDomains []string       `json:"searchDomains"`
+	MatchDomains  []string       `json:"matchDomains,omitempty"`
 }
 
 // parcelFileDescriptor implements ParcelFileDescriptor

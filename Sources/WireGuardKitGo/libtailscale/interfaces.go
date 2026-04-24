@@ -98,6 +98,7 @@ type VPNServiceBuilder interface {
 	SetMTU(int32) error
 	AddDNSServer(string) error
 	AddSearchDomain(string) error
+	AddMatchDomain(string) error
 	AddRoute(string, int32) error
 	ExcludeRoute(string, int32) error
 	AddAddress(string, int32) error

@@ -21,6 +21,7 @@ class PacketTunnelSettingsGenerator {
     let excludedRoutes: [IPAddressRange]
     let dns: [String]
     let dnsSearch: [String]?
+    let dnsMatchDomains: [String]?
     let defaultMTU: UInt16?
 
     init(tunnelConfiguration: TunnelConfiguration, resolvedEndpoints: [Endpoint?]) {
@@ -31,6 +32,7 @@ class PacketTunnelSettingsGenerator {
         self.excludedRoutes = []
         self.dns = []
         self.dnsSearch = []
+        self.dnsMatchDomains = nil
         self.defaultMTU = nil
     }
 
@@ -42,12 +44,14 @@ class PacketTunnelSettingsGenerator {
         self.routes = []
         self.excludedRoutes = []
         self.dnsSearch = []
+        self.dnsMatchDomains = nil
         self.dns = ["8.8.8.8", "8.8.4.4", "9.9.9.9", "223.5.5.5", "223.6.6.6", "114.114.114.114"]
     }
 
-    init(addresses: [String]?, routes: [String]?, excludedRoutes: [String]?, dns: [String]?, dnsSearch: [String]?, mtu: UInt16?) {
+    init(addresses: [String]?, routes: [String]?, excludedRoutes: [String]?, dns: [String]?, dnsSearch: [String]?, dnsMatchDomains: [String]?, mtu: UInt16?) {
         self.dns = dns ??  ["8.8.8.8", "8.8.4.4", "9.9.9.9", "223.5.5.5", "223.6.6.6", "114.114.114.114"]
         self.dnsSearch = dnsSearch
+        self.dnsMatchDomains = dnsMatchDomains
         var interfaceAddresses: [IPAddressRange] = []
         var tunnelRoutes: [IPAddressRange] = []
         var tunnelExcludedRoutes: [IPAddressRange] = []
@@ -199,9 +203,15 @@ class PacketTunnelSettingsGenerator {
         if !dnsServerStrings.isEmpty {
             let dnsSettings = NEDNSSettings(servers: dnsServerStrings)
             dnsSettings.searchDomains = getDNSSearch()
-            if !dnsServerStrings.isEmpty {
+            // __BEGIN_CYLONIX_MOD__
+            // Use split DNS match domains from the Go DNS manager when available.
+            // Empty list or nil means capture all DNS (exit node / no split DNS).
+            if let matchDomains = dnsMatchDomains, !matchDomains.isEmpty {
+                dnsSettings.matchDomains = matchDomains
+            } else {
                 dnsSettings.matchDomains = [""] // All DNS queries must first go through the tunnel's DNS
             }
+            // __END_CYLONIX_MOD__
             networkSettings.dnsSettings = dnsSettings
         }
 

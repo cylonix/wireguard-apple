@@ -168,6 +168,13 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) error {
 				return err
 			}
 		}
+		// __BEGIN_CYLONIX_ADD__
+		for _, dom := range dcfg.MatchDomains {
+			if err := builder.AddMatchDomain(dom.WithoutTrailingDot()); err != nil {
+				return err
+			}
+		}
+		// __END_CYLONIX_ADD__
 		b.logger.Logf("updateTUN: set nameservers")
 	}
 
