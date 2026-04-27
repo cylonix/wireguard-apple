@@ -21,6 +21,9 @@ import (
 	"tailscale.com/types/logid"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/syspolicy"
+	// __BEGIN_CYLONIX_ADD__
+	"tailscale.com/util/syspolicy/setting"
+	// __END_CYLONIX_ADD__
 )
 
 const defaultMTU = 1280 // minimalMTU from wgengine/userspace.go
@@ -42,7 +45,13 @@ func newApp(dataDir, directFileRoot string, appCtx AppContext) Application {
 	a.store = newStateStore(a.appCtx)
 	a.policyStore = &syspolicyHandler{a: a}
 	netmon.RegisterInterfaceGetter(a.getInterfaces)
-	syspolicy.RegisterHandler(a.policyStore)
+	// __BEGIN_CYLONIX_MOD__
+	// v1.96: syspolicy.RegisterHandler was removed; the new API is
+	// syspolicy.RegisterStore which expects a source.Store.
+	if _, err := syspolicy.RegisterStore("apple", setting.DeviceScope, a.policyStore); err != nil {
+		log.Printf("syspolicy.RegisterStore: %v", err)
+	}
+	// __END_CYLONIX_MOD__
 	go func() {
 		defer func() {
 			if p := recover(); p != nil {

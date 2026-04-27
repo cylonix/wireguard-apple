@@ -24,15 +24,50 @@ GOOS_iphoneos := ios
 build: $(DESTDIR)/libwg-go.a
 version-header: $(DESTDIR)/wireguard-go-version.h
 
+# __BEGIN_CYLONIX_MOD__
+# Prefer the tailscale-pinned Go toolchain (cached by tool/gocross-wrapper.sh
+# at ~/.cache/tsgo/<rev>/) when the sibling tailscale checkout pins one.
+# Cylonix's v1.96.4-rebased tailscale fork requires go >= 1.26.1, which is
+# newer than what /usr/local/go ships on most dev machines; without this
+# override the Xcode wireguard-go-bridge build copies /usr/local/go (1.25.x)
+# into a tmp goroot and then fails with "module ../../../tailscale requires
+# go >= 1.26.1". When the tsgo cache is absent we fall back to upstream's
+# behaviour and rely on /usr/local/go.
+TAILSCALE_TSGO_REV := $(strip $(shell cat $(CURDIR)/../../../tailscale/go.toolchain.rev 2>/dev/null))
+ifneq ($(TAILSCALE_TSGO_REV),)
+TAILSCALE_TSGO := $(HOME)/.cache/tsgo/$(TAILSCALE_TSGO_REV)
+ifeq ($(wildcard $(TAILSCALE_TSGO)/bin/go),$(TAILSCALE_TSGO)/bin/go)
+REAL_GOROOT := $(TAILSCALE_TSGO)
+PATH := $(TAILSCALE_TSGO)/bin:$(PATH)
+endif
+endif
+
+ifeq ($(REAL_GOROOT),)
 REAL_GOROOT := $(shell go env GOROOT 2>/dev/null)
+endif
 # Xcode does not pass user shell $PATH setting.
 ifeq ($(REAL_GOROOT),)
 	REAL_GOROOT=/usr/local/go
 	REAL_GOROOT_HARD_SET=yes
 	PATH += :/usr/local/go/bin
 endif
+# __END_CYLONIX_MOD__
 export GOROOT := $(BUILDDIR)/goroot
-$(GOROOT)/.prepared:
+# __BEGIN_CYLONIX_MOD__
+# Track REAL_GOROOT in a stamp file so a switch between /usr/local/go and the
+# tsgo cache (or any GOROOT change) invalidates the prepared GOROOT. Without
+# this, an Xcode build that rsync'd from /usr/local/go (1.25.x) survives a
+# Makefile change pointing PATH at tsgo (1.26.x), and `go build` fails with
+# "compile: version go1.25.x does not match go tool version go1.26.x".
+$(BUILDDIR)/.real_goroot.stamp: FORCE
+	@mkdir -p "$(BUILDDIR)"
+	@printf '%s\n' "$(REAL_GOROOT)" > "$@.new"
+	@if ! cmp -s "$@.new" "$@" 2>/dev/null; then mv "$@.new" "$@"; else rm "$@.new"; fi
+.PHONY: FORCE
+FORCE:
+
+$(GOROOT)/.prepared: $(BUILDDIR)/.real_goroot.stamp
+# __END_CYLONIX_MOD__
 	@echo "PATH=${PATH}"
 	@echo "REAL_GOROOT=${REAL_GOROOT} REAL_GOROOT_HARD_SET=${REAL_GOROOT_HARD_SET}"
 	[ -n "$(REAL_GOROOT)" ]

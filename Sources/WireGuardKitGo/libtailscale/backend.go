@@ -18,6 +18,10 @@ import (
 
 	"tailscale.com/drive/driveimpl"
 	_ "tailscale.com/feature/condregister"
+	// __BEGIN_CYLONIX_ADD__
+	"tailscale.com/feature/taildrop"
+	"tailscale.com/ipn/ipnauth"
+	// __END_CYLONIX_ADD__
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnlocal"
@@ -140,10 +144,21 @@ func (a *App) runBackend(ctx context.Context) error {
 	a.backend = b.backend
 	defer b.CloseTUNs()
 
-	h := localapi.NewHandler(b.backend, log.Printf, *a.logIDPublicAtomic.Load())
+	// __BEGIN_CYLONIX_MOD__
+	// v1.96: localapi.NewHandler now takes a HandlerConfig struct
+	// (Actor, Backend, Logf, LogID, EventBus). The EventBus is sourced
+	// from the tsd.System on the LocalBackend.
+	h := localapi.NewHandler(localapi.HandlerConfig{
+		Actor:    ipnauth.Self,
+		Backend:  b.backend,
+		Logf:     log.Printf,
+		LogID:    *a.logIDPublicAtomic.Load(),
+		EventBus: b.backend.Sys().Bus.Get(),
+	})
 	h.PermitRead = true
 	h.PermitWrite = true
 	a.localAPIHandler = h
+	// __END_CYLONIX_MOD__
 
 	a.ready.Done()
 
@@ -274,8 +289,12 @@ func (a *App) runBackend(ctx context.Context) error {
 func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, store *stateStore,
 	settings settingsFunc) (*backend, error) {
 
-	sys := new(tsd.System)
+	// __BEGIN_CYLONIX_MOD__
+	// v1.96: tsd.System now requires a non-nil eventbus.Bus before use;
+	// tsd.NewSystem allocates the bus and a default health tracker.
+	sys := tsd.NewSystem()
 	sys.Set(store)
+	// __END_CYLONIX_MOD__
 
 	logf := logger.RusagePrefixLog(log.Printf)
 	b := &backend{
@@ -309,12 +328,16 @@ func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, stor
 		log.Printf("Generated new logID: %s (%s), err: %v", logID.Public(), newLogID.Public(), err)
 	}
 
-	netMon, err := netmon.New(logf)
+	// __BEGIN_CYLONIX_MOD__
+	// v1.96: netmon.New requires the eventbus from the tsd.System;
+	// HealthTracker is now a SubSystem field, accessed via .Get().
+	netMon, err := netmon.New(sys.Bus.Get(), logf)
 	if err != nil {
 		log.Printf("netmon.New: %v", err)
 	}
 	b.netMon = netMon
-	b.setupLogs(dataDir, logID, logf, sys.HealthTracker())
+	b.setupLogs(dataDir, logID, logf, sys.HealthTracker.Get())
+	// __END_CYLONIX_MOD__
 	dialer := new(tsdial.Dialer)
 	dialer.Logf = logf
 	b.devices.SetDialer(dialer) // __CYLONIX_ADD__
@@ -330,10 +353,19 @@ func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, stor
 		Dialer:         dialer,
 		SetSubsystem:   sys.Set,
 		NetMon:         b.netMon,
-		HealthTracker:  sys.HealthTracker(),
+		HealthTracker:  sys.HealthTracker.Get(), // __CYLONIX_MOD__ v1.96: SubSystem.Get()
 		Metrics:        sys.UserMetricsRegistry(),
 		ControlKnobs:   sys.ControlKnobs(), // __CYLONIX_ADD__
 		DriveForLocal:  driveimpl.NewFileSystemForLocal(logf),
+		// __BEGIN_CYLONIX_ADD__
+		// v1.96 wgengine.Config gained an EventBus field. tstun.Wrap (called
+		// by NewUserspaceEngine) does bus.Client("net.tstun") on it
+		// unconditionally, so omitting it panics with a nil-pointer
+		// dereference at tstun/wrap.go:343 during cold start. The bus must
+		// be the same one tsd.System owns so all subsystems publish to a
+		// single broker.
+		EventBus: sys.Bus.Get(),
+		// __END_CYLONIX_ADD__
 	})
 	if err != nil {
 		return nil, fmt.Errorf("runBackend: NewUserspaceEngine: %v", err)
@@ -357,7 +389,16 @@ func (a *App) newBackend(dataDir, directFileRoot string, appCtx AppContext, stor
 		engine.Close()
 		return nil, fmt.Errorf("runBackend: NewLocalBackend: %v", err)
 	}
-	lb.SetDirectFileRoot(directFileRoot)
+	// __BEGIN_CYLONIX_MOD__
+	// v1.96: SetDirectFileRoot moved from LocalBackend to the
+	// feature/taildrop Extension. Look up the registered extension
+	// (auto-registered by feature/condregister) and call it there.
+	if ext, ok := ipnlocal.GetExt[*taildrop.Extension](lb); ok {
+		ext.SetDirectFileRoot(directFileRoot)
+	} else if directFileRoot != "" {
+		log.Printf("taildrop extension not registered; ignoring directFileRoot=%q", directFileRoot)
+	}
+	// __END_CYLONIX_MOD__
 
 	if err := ns.Start(lb); err != nil {
 		return nil, fmt.Errorf("startNetstack: %w", err)
@@ -406,11 +447,28 @@ func (a *App) closeVpnService(err error, b *backend) {
 }
 
 // __BEGIN_CYLONIX_ADD__
+// GetTailDropFilePath returns the absolute on-disk path for a received Taildrop
+// file with the given basename.
+//
+// In v1.96 the LocalBackend.GetFilePath helper moved out of ipnlocal and into
+// feature/taildrop, but only as an unexported method on the (also unexported)
+// taildrop.manager type — so we can't call it from outside the package. On
+// iOS/macOS we always run with directFileRoot set (the Network Extension
+// writes received files straight into that directory), so we can reconstruct
+// the same answer by joining the configured directFileRoot with the basename.
+// If a safer/public Extension.GetFilePath wrapper is added upstream later,
+// this should switch to use it.
 func (a *App) GetTailDropFilePath(filename string) (string, error) {
 	if a.backend == nil {
 		return "", fmt.Errorf("backend not initialized")
 	}
-	return a.backend.GetFilePath(filename)
+	if a.directFileRoot == "" {
+		return "", fmt.Errorf("GetTailDropFilePath: directFileRoot not set; v1.96 taildrop does not expose a public path lookup")
+	}
+	if filename == "" {
+		return "", fmt.Errorf("GetTailDropFilePath: empty filename")
+	}
+	return filepath.Join(a.directFileRoot, filename), nil
 }
 
 // __END_CYLONIX_ADD__

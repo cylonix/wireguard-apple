@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"tailscale.com/client/tailscale/apitype"
+	"tailscale.com/feature/taildrop" // __CYLONIX_MOD__ moved from tailscale.com/taildrop in v1.96
 	"tailscale.com/ipn"
-	"tailscale.com/taildrop"
+	// __BEGIN_CYLONIX_ADD__
+	"tailscale.com/ipn/ipnlocal"
+	// __END_CYLONIX_ADD__
 )
 
 func (app *App) WatchNotifications(mask int, cb NotificationCallback) NotificationManager {
@@ -90,6 +93,14 @@ func (app *App) WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFi
 				log.Printf("WatchAwaitingFiles: done")
 			}
 		}()
+		// __BEGIN_CYLONIX_MOD__
+		// v1.96: AwaitWaitingFiles / WaitingFilesDir moved off LocalBackend
+		// into the feature/taildrop Extension. Resolve the extension once
+		// and call it directly. The "waiting files dir" concept doesn't have
+		// a public accessor anymore, so we report directFileRoot (which on
+		// iOS/macOS is always where received files land).
+		ext, _ := ipnlocal.GetExt[*taildrop.Extension](app.backend)
+		// __END_CYLONIX_MOD__
 		for {
 			ctx2, cancel2 := context.WithCancel(context.Background())
 			select {
@@ -98,7 +109,14 @@ func (app *App) WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFi
 				cancel2()
 				return
 			default:
-				files, err := app.backend.AwaitWaitingFiles(ctx2)
+				// __BEGIN_CYLONIX_MOD__
+				if ext == nil {
+					log.Printf("WatchAwaitingFiles: taildrop extension not registered")
+					time.Sleep(time.Second)
+					continue
+				}
+				files, err := ext.AwaitWaitingFiles(ctx2)
+				// __END_CYLONIX_MOD__
 				if err != nil {
 					if !errors.Is(err, taildrop.ErrNoTaildrop) {
 						log.Printf("WatchAwaitingFiles: error=%v", err)
@@ -108,7 +126,11 @@ func (app *App) WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFi
 				}
 				if len(files) != 0 {
 					//log.Printf("WatchAwaitingFiles: count=%d", len(files))
-					dir := app.backend.WaitingFilesDir()
+					// __BEGIN_CYLONIX_MOD__
+					// v1.96: no public WaitingFilesDir() — use directFileRoot
+					// which is the only writable target on iOS/macOS.
+					dir := app.directFileRoot
+					// __END_CYLONIX_MOD__
 					cb(dir, files)
 					v, _ := json.Marshal(files)
 					sleep := 1

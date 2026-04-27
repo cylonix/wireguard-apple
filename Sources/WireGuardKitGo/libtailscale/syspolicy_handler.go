@@ -10,6 +10,13 @@ import (
 
 	"tailscale.com/util/set"
 	"tailscale.com/util/syspolicy"
+	// __BEGIN_CYLONIX_ADD__
+	// v1.96: the old syspolicy.Handler interface was removed in favor of
+	// source.Store, which keys settings on pkey.Key (a string alias) and uses
+	// setting.ErrNotConfigured to signal "no value".
+	"tailscale.com/util/syspolicy/pkey"
+	"tailscale.com/util/syspolicy/setting"
+	// __END_CYLONIX_ADD__
 )
 
 // syspolicyHandler is a syspolicy handler for the Android version of the Tailscale client,
@@ -20,40 +27,43 @@ type syspolicyHandler struct {
 	cbs set.HandleSet[func()]
 }
 
-func (h *syspolicyHandler) ReadString(key string) (string, error) {
+// __BEGIN_CYLONIX_MOD__
+// v1.96: source.Store keys are pkey.Key (a string alias) and the "missing"
+// sentinel is setting.ErrNotConfigured rather than syspolicy.ErrNoSuchKey.
+func (h *syspolicyHandler) ReadString(key pkey.Key) (string, error) {
 	if key == "" {
-		return "", syspolicy.ErrNoSuchKey
+		return "", setting.ErrNotConfigured
 	}
-	retVal, err := h.a.appCtx.GetSyspolicyStringValue(key)
+	retVal, err := h.a.appCtx.GetSyspolicyStringValue(string(key))
 	return retVal, translateHandlerError(err)
 }
 
-func (h *syspolicyHandler) ReadBoolean(key string) (bool, error) {
+func (h *syspolicyHandler) ReadBoolean(key pkey.Key) (bool, error) {
 	if key == "" {
-		return false, syspolicy.ErrNoSuchKey
+		return false, setting.ErrNotConfigured
 	}
-	retVal, err := h.a.appCtx.GetSyspolicyBooleanValue(key)
+	retVal, err := h.a.appCtx.GetSyspolicyBooleanValue(string(key))
 	return retVal, translateHandlerError(err)
 }
 
-func (h *syspolicyHandler) ReadUInt64(key string) (uint64, error) {
+func (h *syspolicyHandler) ReadUInt64(key pkey.Key) (uint64, error) {
 	if key == "" {
-		return 0, syspolicy.ErrNoSuchKey
+		return 0, setting.ErrNotConfigured
 	}
 	// We don't have any UInt64 policy settings as of 2024-08-06.
 	return 0, errors.New("ReadUInt64 is not implemented on Android")
 }
 
-func (h *syspolicyHandler) ReadStringArray(key string) ([]string, error) {
+func (h *syspolicyHandler) ReadStringArray(key pkey.Key) ([]string, error) {
 	if key == "" {
-		return nil, syspolicy.ErrNoSuchKey
+		return nil, setting.ErrNotConfigured
 	}
-	retVal, err := h.a.appCtx.GetSyspolicyStringArrayJSONValue(key)
+	retVal, err := h.a.appCtx.GetSyspolicyStringArrayJSONValue(string(key))
 	if err := translateHandlerError(err); err != nil {
 		return nil, err
 	}
 	if retVal == "" {
-		return nil, syspolicy.ErrNoSuchKey
+		return nil, setting.ErrNotConfigured
 	}
 	var arr []string
 	jsonErr := json.Unmarshal([]byte(retVal), &arr)
@@ -62,6 +72,7 @@ func (h *syspolicyHandler) ReadStringArray(key string) ([]string, error) {
 	}
 	return arr, err
 }
+// __END_CYLONIX_MOD__
 
 func (h *syspolicyHandler) RegisterChangeCallback(cb func()) (unregister func(), err error) {
 	h.mu.Lock()
@@ -83,8 +94,20 @@ func (h *syspolicyHandler) notifyChanged() {
 }
 
 func translateHandlerError(err error) error {
-	if err != nil && !errors.Is(err, syspolicy.ErrNoSuchKey) && err.Error() == syspolicy.ErrNoSuchKey.Error() {
-		return syspolicy.ErrNoSuchKey
+	// __BEGIN_CYLONIX_MOD__
+	// v1.96: report missing values as setting.ErrNotConfigured (the
+	// source.Store contract). Preserve compatibility with callers that
+	// still hand back an err whose string matches the legacy
+	// syspolicy.ErrNoSuchKey value.
+	if err == nil {
+		return nil
 	}
-	return err // may be nil or non-nil
+	if errors.Is(err, setting.ErrNotConfigured) {
+		return setting.ErrNotConfigured
+	}
+	if errors.Is(err, syspolicy.ErrNoSuchKey) || err.Error() == syspolicy.ErrNoSuchKey.Error() {
+		return setting.ErrNotConfigured
+	}
+	return err
+	// __END_CYLONIX_MOD__
 }
