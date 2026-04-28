@@ -368,6 +368,14 @@ func (b *backend) tunnelUpdatedHandler() {
 	}
 	if i, ok := ifState.Interface[name]; ok {
 		b.logger.Logf("tunnelUpdated: interface state: %#v", i)
+		// __CYLONIX_ADD__ Register the tun interface with netmon so that
+		// TailscaleInterfaceIndex() returns a non-zero index. On iOS the
+		// peerapi listener (peerapi.go listen()) requires a non-zero
+		// tunIfIndex to bind out of the network sandbox; without this
+		// every initPeerAPIListener attempt fails with
+		// "peerapi: cannot listen on <ip> with tunIfIndex 0" and
+		// Status.PeerAPIURL stays empty.
+		netmon.SetTailscaleInterfaceProps(name, i.Index)
 		b.appCtx.TunnelUpdated(i.Index)
 		return
 	}

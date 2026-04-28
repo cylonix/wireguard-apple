@@ -110,4 +110,4 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-replace tailscale.com => github.com/cylonix/tailscale v1.96.4-cylonix.1
+replace tailscale.com => github.com/cylonix/tailscale v1.96.4-cylonix.2
