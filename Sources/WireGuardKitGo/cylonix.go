@@ -274,11 +274,10 @@ func cylonixInit() error {
 	}
 	store = newStateStore()
 	clogf("%v starting libtailscale %v", dashes, dashes)
-	tailDropDir, err := getPlatformTailDropDir(dataDir)
+	tailDropDir, err := getPlatformTailDropDir()
 	if err != nil {
 		return fmt.Errorf("failed to get platform taildrop dir: %w", err)
 	}
-	clogf("taildrop directFileRoot=%v", tailDropDir)
 
 	// Check to enable tailchat
 	if err := checkAndStartTailchat(); err != nil {
@@ -382,27 +381,8 @@ func handleFilesWaiting(dir string, files []apitype.WaitingFile) {
 	filesWaiting(string(v))
 }
 
-// getPlatformTailDropDir returns the directory where taildrop should write
-// received files in DirectFileMode. The directory is a sub-folder of the
-// shared app group container so the host app's BackgroundTaskManager can
-// read from it.
-//
-// In v1.96 the taildrop extension's fileRoot lookup falls back to
-// `<TailscaleVarRoot>/files/<login>-uid-<uid>` (staged, non-direct mode)
-// when directFileRoot is empty. That works for the network extension but
-// the host app reports filesWaiting.Dir = directFileRoot, so an empty
-// directFileRoot leaves the host app looking for files at "/<name>".
-// Returning a concrete path here forces direct file mode and gives the
-// host app the right source dir.
-func getPlatformTailDropDir(dataDir string) (string, error) {
-	if dataDir == "" {
-		return "", fmt.Errorf("getPlatformTailDropDir: empty dataDir")
-	}
-	dir := filepath.Join(dataDir, "taildrop-files")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("getPlatformTailDropDir: create %s: %w", dir, err)
-	}
-	return dir, nil
+func getPlatformTailDropDir() (string, error) {
+	return "", nil
 }
 
 func setLogOutput(writer io.Writer) (err error) {

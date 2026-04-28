@@ -7,8 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"tailscale.com/client/tailscale/apitype"
@@ -127,9 +130,19 @@ func (app *App) WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFi
 				if len(files) != 0 {
 					//log.Printf("WatchAwaitingFiles: count=%d", len(files))
 					// __BEGIN_CYLONIX_MOD__
-					// v1.96: no public WaitingFilesDir() — use directFileRoot
-					// which is the only writable target on iOS/macOS.
+					// v1.96 removed LocalBackend.WaitingFilesDir(). When
+					// directFileRoot is set, taildrop writes there directly;
+					// otherwise it stages files under
+					// <TailscaleVarRoot>/files/<login>-uid-<uid> (see
+					// feature/taildrop/ext.go fileRoot()). The host app needs
+					// the actual on-disk location to read incoming peer-message
+					// attachments and to let the user pick a destination via
+					// the share sheet, so reproduce the staging-mode path
+					// computation here using public LocalBackend accessors.
 					dir := app.directFileRoot
+					if dir == "" {
+						dir = stagingFilesDir(app.backend)
+					}
 					// __END_CYLONIX_MOD__
 					cb(dir, files)
 					v, _ := json.Marshal(files)
@@ -156,3 +169,41 @@ func (app *App) WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFi
 	}()
 	return nm
 }
+
+// __BEGIN_CYLONIX_ADD__
+// stagingFilesDir reproduces the staging-mode path that
+// feature/taildrop/ext.go fileRoot() builds when SetDirectFileRoot has
+// not been called: <TailscaleVarRoot>/files/<login>-uid-<uid>.
+//
+// The original libtailscale called LocalBackend.WaitingFilesDir() to get
+// this path, but v1.96 removed that accessor. Since taildrop's fileRoot
+// helper is unexported and the same inputs (varRoot, login, uid) are all
+// reachable via public LocalBackend methods, reproduce the path here so
+// the host app gets a real source dir for both peer-message attachment
+// auto-save and share-sheet user-picked destinations.
+//
+// Returns "" if any required input is unavailable, in which case the
+// caller falls back to the empty path (same as previous broken state).
+func stagingFilesDir(b *ipnlocal.LocalBackend) string {
+	if b == nil {
+		return ""
+	}
+	varRoot := b.TailscaleVarRoot()
+	if varRoot == "" {
+		return ""
+	}
+	profile := b.CurrentProfile()
+	if !profile.Valid() {
+		return ""
+	}
+	up := profile.UserProfile()
+	if up.LoginName == "" {
+		return ""
+	}
+	baseDir := fmt.Sprintf("%s-uid-%d",
+		strings.ReplaceAll(up.LoginName, "@", "-"),
+		up.ID)
+	return filepath.Join(varRoot, "files", baseDir)
+}
+
+// __END_CYLONIX_ADD__
