@@ -13,6 +13,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     #if os(iOS)
     private let networkMonitor = NetworkMonitor() // __CYLONIX_MOD__
     #endif
+    private let appCommandStateLock = NSLock()
+    private let lifecycleStateLock = NSLock()
+    private let backendLivenessQueue = DispatchQueue(label: "io.cylonix.sase.backendLivenessProbe", qos: .userInitiated)
+    private var activeAppCommands: [String: (method: String, startedAt: Date)] = [:]
+    private var backendLivenessObserverInstalled = false
+    private var providerStopping = false
 
     override init() {
         wg_log(.info, message: "=========== PacketTunnelProvider initialization ===========")
@@ -42,6 +48,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }()
 
     deinit {
+        removeBackendLivenessProbeObserver()
         wg_log(.info, staticMessage: "Tunnel is deallocated...")
     }
 
@@ -54,8 +61,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let errorNotifier = ErrorNotifier(activationAttemptId: activationAttemptId)
 
         wg_log(.info, staticMessage: "Starting tunnel...")
+        setProviderStopping(false)
+        setupBackendLivenessProbeObserver()
 
         wg_log(.info, message: "Starting tunnel from the " + (activationAttemptId == nil ? "OS directly, rather than the app" : "app"))
+        wg_log(.info, message: "[peerMessage] packetTunnel startTunnel activationAttemptId=\(activationAttemptId ?? "") optionsKeys=\((options ?? [:]).keys.sorted())")
 
         checkOnDemandSettingsOnStart(activationAttemptId) // __CYLONIX_MOD__
         guard let tunnelProviderProtocol = protocolConfiguration as? NETunnelProviderProtocol,
@@ -74,6 +84,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let interfaceName = self.adapter.interfaceName ?? "unknown"
 
                 wg_log(.info, message: "Tunnel interface is \(interfaceName)")
+                wg_log(.info, message: "[peerMessage] packetTunnel startTunnel success interface=\(interfaceName)")
 
                 completionHandler(nil)
                 return
@@ -114,19 +125,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        setProviderStopping(true)
         wg_log(.info, message: "Stopping tunnel due to \(reason)")
+        wg_log(.info, message: "[peerMessage] packetTunnel stopTunnel reason=\(reason) raw=\(reason.rawValue) activeCommands=\(activeAppCommandSummary())")
 
         checkOnDemandSettingsOnStop(reason: reason, completionHandler: completionHandler) // __CYLONIX_MOD__
     }
 
     private func completeStop(_ completionHandler: @escaping () -> Void) {
+        wg_log(.info, message: "[peerMessage] packetTunnel completeStop begin activeCommands=\(activeAppCommandSummary())")
         adapter.stop { error in
             ErrorNotifier.removeLastErrorFile()
 
             if let error = error {
                 wg_log(.error, message: "Failed to stop WireGuard adapter: \(error.localizedDescription)")
             }
+            wg_log(.info, message: "[peerMessage] packetTunnel completeStop adapter stopped error=\(String(describing: error)) activeCommands=\(self.activeAppCommandSummary())")
             completionHandler()
+            wg_log(.info, staticMessage: "[peerMessage] packetTunnel completeStop completionHandler returned")
 
             #if os(macOS)
                 // HACK: This is a filthy hack to work around Apple bug 32073323 (dup'd by us as 47526107).
@@ -135,6 +151,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 exit(0)
             #endif
         }
+    }
+
+    private func setProviderStopping(_ stopping: Bool) {
+        lifecycleStateLock.lock()
+        providerStopping = stopping
+        lifecycleStateLock.unlock()
+    }
+
+    private func isProviderStopping() -> Bool {
+        lifecycleStateLock.lock()
+        let stopping = providerStopping
+        lifecycleStateLock.unlock()
+        return stopping
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
@@ -230,9 +259,11 @@ extension PacketTunnelProvider {
 
     private func checkOnDemandSettingsOnStop(reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         if !canLoadVPNConfig() {
+            wg_log(.info, message: "[peerMessage] packetTunnel stop on-demand check skipped reason=\(reason) raw=\(reason.rawValue)")
             return
         }
         if reason != .userInitiated {
+            wg_log(.info, message: "[peerMessage] packetTunnel stop is not userInitiated; completing stop reason=\(reason) raw=\(reason.rawValue)")
             completeStop(completionHandler)
             return
         }
@@ -243,6 +274,7 @@ extension PacketTunnelProvider {
             return
         }
         // Get our specific tunnel manager using our bundle ID
+        wg_log(.info, staticMessage: "[peerMessage] packetTunnel stop loading managers for userInitiated stop")
         NETunnelProviderManager.loadAllFromPreferences { managers, error in
             // Check if we have an error
             if let error = error {
@@ -261,6 +293,7 @@ extension PacketTunnelProvider {
                 return
             }
 
+            wg_log(.info, message: "[peerMessage] packetTunnel stop manager found onDemand=\(ourManager.isOnDemandEnabled) enabled=\(ourManager.isEnabled)")
             if !ourManager.isOnDemandEnabled {
                 wg_log(.info, message: "On-demand was already disabled from system settings")
                 self.completeStop(completionHandler)
@@ -283,7 +316,103 @@ extension PacketTunnelProvider {
 }
 
 extension PacketTunnelProvider {
+    private func setupBackendLivenessProbeObserver() {
+        if backendLivenessObserverInstalled {
+            return
+        }
+        backendLivenessObserverInstalled = true
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let provider = Unmanaged<PacketTunnelProvider>.fromOpaque(observer).takeUnretainedValue()
+                provider.handleBackendLivenessProbe()
+            },
+            PacketTunnelMessage.backendLivenessProbe as CFString,
+            nil,
+            .deliverImmediately
+        )
+        wg_log(.info, message: "[peerMessage] packetTunnel backend liveness observer installed")
+    }
+
+    private func removeBackendLivenessProbeObserver() {
+        if !backendLivenessObserverInstalled {
+            return
+        }
+        backendLivenessObserverInstalled = false
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        CFNotificationCenterRemoveObserver(
+            center,
+            observer,
+            CFNotificationName(PacketTunnelMessage.backendLivenessProbe as CFString),
+            nil
+        )
+    }
+
+    private func handleBackendLivenessProbe() {
+        backendLivenessQueue.async {
+            guard let appGroupId = FileManager.appGroupId,
+                  let defaults = UserDefaults(suiteName: appGroupId)
+            else {
+                wg_log(.error, message: "[peerMessage] backend liveness probe failed: app group defaults unavailable")
+                return
+            }
+
+            let requestID = defaults.string(forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeRequestID) ?? ""
+            let requestAtUs = defaults.double(forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeRequestAtUs)
+            let nowUs = floor(Date().timeIntervalSince1970 * 1_000_000)
+            var alive = false
+            var backendState = ""
+            var error = ""
+            let stopping = self.isProviderStopping()
+
+            if requestID.isEmpty {
+                error = "missing_request_id"
+            } else if stopping {
+                error = "provider_stopping"
+            } else if let result = wgSendCommand("status", "{\"peers\":false}") {
+                let response = String(cString: result)
+                free(result)
+                if let data = response.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                {
+                    backendState = json["BackendState"] as? String ?? ""
+                    alive = true
+                } else {
+                    error = "invalid_status_response:\(String(response.prefix(120)))"
+                }
+            } else {
+                error = "status_command_failed"
+            }
+
+            defaults.set(requestID, forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeResponseID)
+            defaults.set(nowUs, forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeResponseAtUs)
+            defaults.set(alive, forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeAlive)
+            defaults.set(backendState, forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeBackendState)
+            defaults.set(error, forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeError)
+            defaults.set(stopping, forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeProviderStopping)
+            defaults.synchronize()
+
+            wg_log(.info, message: "[peerMessage] backend liveness probe response id=\(requestID) alive=\(alive) backendState=\(backendState) stopping=\(stopping) error=\(error) requestAgeUs=\(Int64(nowUs - requestAtUs))")
+            CFNotificationCenterPostNotification(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                CFNotificationName(PacketTunnelNotification.backendLivenessProbeResponse as CFString),
+                nil,
+                nil,
+                true
+            )
+        }
+    }
+
     private func handleAppCommands(_ method: String, _ args: String, _ completionHandler: ((Data?) -> Void)?) {
+        let commandID = UUID().uuidString
+        let startedAt = Date()
+        registerAppCommand(id: commandID, method: method, startedAt: startedAt)
+        wg_log(.info, message: "[peerMessage] packetTunnel app command start id=\(commandID) method=\(method) argsBytes=\(args.utf8.count) hasCompletion=\(completionHandler != nil)")
         let appCmdQueue = DispatchQueue(label: "io.cylonix.sase.wireguard.appCmdQueue", qos: .userInitiated)
         appCmdQueue.async {
             var ret = "Failed to send command '\(method)' to service"
@@ -291,15 +420,44 @@ extension PacketTunnelProvider {
                 ret = String(cString: result)
                 free(result)
             }
+            let elapsed = Date().timeIntervalSince(startedAt)
+            wg_log(.info, message: "[peerMessage] packetTunnel app command result id=\(commandID) method=\(method) elapsedMs=\(Int(elapsed * 1000)) resultBytes=\(ret.utf8.count) resultPrefix=\(String(ret.prefix(160)))")
+            self.unregisterAppCommand(id: commandID)
             if let completionHandler = completionHandler {
                 if let data = ret.data(using: .utf8) {
                     completionHandler(data)
+                    wg_log(.info, message: "[peerMessage] packetTunnel app command completion id=\(commandID) method=\(method) bytes=\(data.count)")
                 } else {
                     wg_log(.error, message: "Failed to handle app command: \(method) with args: \(args): failed to convert response to Data")
                     completionHandler(nil)
+                    wg_log(.info, message: "[peerMessage] packetTunnel app command completion id=\(commandID) method=\(method) bytes=nil")
                 }
             }
         }
+    }
+
+    private func registerAppCommand(id: String, method: String, startedAt: Date) {
+        appCommandStateLock.lock()
+        activeAppCommands[id] = (method: method, startedAt: startedAt)
+        appCommandStateLock.unlock()
+    }
+
+    private func unregisterAppCommand(id: String) {
+        appCommandStateLock.lock()
+        activeAppCommands.removeValue(forKey: id)
+        appCommandStateLock.unlock()
+    }
+
+    private func activeAppCommandSummary() -> String {
+        let now = Date()
+        appCommandStateLock.lock()
+        let commands = activeAppCommands.map { entry in
+            let id = entry.key
+            let command = entry.value
+            return "\(id.prefix(8)):\(command.method):\(Int(now.timeIntervalSince(command.startedAt) * 1000))ms"
+        }.sorted()
+        appCommandStateLock.unlock()
+        return commands.isEmpty ? "none" : commands.joined(separator: ",")
     }
 
     #if os(iOS)

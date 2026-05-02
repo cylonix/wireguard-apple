@@ -220,8 +220,10 @@ func (a *App) runBackend(ctx context.Context) error {
 			log.Println("rundBackend 7")
 			configErrs <- b.updateTUN(cfg.rcfg, cfg.dcfg)
 		case s := <-onVPNRequested:
+			log.Printf("[peerMessage] localbackend onVPNRequested serviceID=%s existingServiceNil=%v state=%v cfgNil=%v", s.ID(), vpnService.service == nil, state, cfg.rcfg == nil) // __CYLONIX_ADD__
 			if vpnService.service != nil && vpnService.service.ID() == s.ID() {
 				log.Println("rundBackend 8")
+				log.Printf("[peerMessage] localbackend onVPNRequested ignored same serviceID=%s", s.ID()) // __CYLONIX_ADD__
 				// Still the same VPN instance, do nothing
 				break
 			}
@@ -253,6 +255,7 @@ func (a *App) runBackend(ctx context.Context) error {
 			b.backend.DebugRebind()
 
 			vpnService.service = s
+			log.Printf("[peerMessage] localbackend vpnService set serviceID=%s state=%v cfgNil=%v", s.ID(), state, cfg.rcfg == nil) // __CYLONIX_ADD__
 
 			if networkMap != nil {
 				// TODO
@@ -264,12 +267,14 @@ func (a *App) runBackend(ctx context.Context) error {
 			}
 			log.Println("rundBackend 11")
 		case s := <-onDisconnect:
+			log.Printf("[peerMessage] localbackend onDisconnect serviceID=%s existingServiceNil=%v existingServiceID=%s", s.ID(), vpnService.service == nil, currentVPNServiceID()) // __CYLONIX_ADD__
 			log.Println("rundBackend 12")
 			b.CloseTUNs()
 			if vpnService.service != nil && vpnService.service.ID() == s.ID() {
 				setProtectFunc(nil) // __CYLONIX_MOD__
 				log.Println("rundBackend 13")
 				vpnService.service = nil
+				log.Printf("[peerMessage] localbackend vpnService cleared serviceID=%s", s.ID()) // __CYLONIX_ADD__
 			}
 			log.Println("rundBackend 14")
 		case i := <-onDNSConfigChanged:
@@ -430,6 +435,7 @@ func (b *backend) isConfigNonNilAndDifferent(rcfg *router.Config, dcfg *dns.OSCo
 
 func (a *App) closeVpnService(err error, b *backend) {
 	log.Printf("VPN update failed: %v", err)
+	log.Printf("[peerMessage] localbackend closeVpnService err=%v existingServiceNil=%v existingServiceID=%s", err, vpnService.service == nil, currentVPNServiceID()) // __CYLONIX_ADD__
 
 	mp := new(ipn.MaskedPrefs)
 	mp.WantRunning = false
@@ -444,7 +450,15 @@ func (a *App) closeVpnService(err error, b *backend) {
 
 	vpnService.service.DisconnectVPN()
 	vpnService.service = nil
+	log.Printf("[peerMessage] localbackend closeVpnService cleared vpnService") // __CYLONIX_ADD__
 }
+
+func currentVPNServiceID() string { // __CYLONIX_ADD__
+	if vpnService.service == nil { // __CYLONIX_ADD__
+		return "<nil>" // __CYLONIX_ADD__
+	} // __CYLONIX_ADD__
+	return vpnService.service.ID() // __CYLONIX_ADD__
+} // __CYLONIX_ADD__
 
 // __BEGIN_CYLONIX_ADD__
 // GetTailDropFilePath returns the absolute on-disk path for a received Taildrop

@@ -19,6 +19,12 @@ protocol TunnelsManagerActivationDelegate: AnyObject {
     func tunnelActivationSucceeded(tunnel: TunnelContainer) // status changed to connected
 }
 
+struct TunnelStatusChangeContext {
+    let source: String
+    let previousStatus: String
+    let systemStatus: String
+}
+
 class TunnelsManager {
     private var tunnels: [TunnelContainer]
     weak var tunnelsListDelegate: TunnelsManagerListDelegate?
@@ -137,7 +143,7 @@ class TunnelsManager {
                     // .NEVPNStatusDidChange, so only refresh when the provider
                     // object did not change.
                     if !providerChanged {
-                        matchingTunnel.refreshStatus()
+                        matchingTunnel.refreshStatus(source: "reload-same-provider")
                     }
                 } else {
                     // Tunnel was added outside the app
@@ -345,7 +351,7 @@ class TunnelsManager {
                 if tunnel.status == .active || tunnel.status == .activating || tunnel.status == .reasserting {
                     // Turn off the tunnel, and then turn it back on, so the changes are made effective
                     tunnel.status = .restarting
-                    wg_log(.info, staticMessage: "stopping tunnel due to config change")
+                    wg_log(.info, message: "[peerMessage] app requested stopTunnel due to config change tunnel=\(tunnel.name) connectionStatus=\(tunnel.tunnelProvider.connection.status)")
                     (tunnel.tunnelProvider.connection as? NETunnelProviderSession)?.stopTunnel()
                 }
             }
@@ -548,7 +554,7 @@ class TunnelsManager {
         tunnel.isAttemptingActivation = false
         guard tunnel.status != .inactive && tunnel.status != .deactivating else {
             wg_log(.info, staticMessage: "StartDeactivation: Tunnel is already inactive or deactivating. Report status and skip ...")
-            tunnel.refreshStatus()
+            tunnel.refreshStatus(source: "startDeactivation-already-inactive")
             return
         }
         #if targetEnvironment(simulator)
@@ -559,7 +565,7 @@ class TunnelsManager {
     }
 
     func refreshStatuses() {
-        tunnels.forEach { $0.refreshStatus() }
+        tunnels.forEach { $0.refreshStatus(source: "refreshStatuses") }
     }
 
     private func activateWaitingTunnelOnDeactivation(of tunnel: TunnelContainer, waitOnSameTunnel: Bool = false) {
@@ -617,13 +623,13 @@ class TunnelsManager {
                 return
             }
 
-            tunnel.refreshStatus()
+            tunnel.refreshStatus(source: "NEVPNStatusDidChange")
         }
     }
 
 
-    static fileprivate var onStatusChange: ((String, String) -> Void)?
-    static func onTunnelStatusChange(handler: @escaping ((String, String) -> Void)) {
+    static fileprivate var onStatusChange: ((String, String, TunnelStatusChangeContext) -> Void)?
+    static func onTunnelStatusChange(handler: @escaping ((String, String, TunnelStatusChangeContext) -> Void)) {
         onStatusChange = handler
     }
 
@@ -681,7 +687,7 @@ class TunnelContainer: NSObject {
                     default:
                         break
                     }
-                    self.refreshStatus()
+                    self.refreshStatus(source: "activation-timeout-poll")
                 }
                 self.activationTimer = activationTimer
                 RunLoop.main.add(activationTimer, forMode: .common)
@@ -702,6 +708,10 @@ class TunnelContainer: NSObject {
 
     var tunnelConfiguration: TunnelConfiguration? {
         return tunnelProvider.tunnelConfiguration
+    }
+
+    var systemStatus: NEVPNStatus {
+        return tunnelProvider.connection.status
     }
 
     var onDemandOption: ActivateOnDemandOption {
@@ -746,14 +756,21 @@ class TunnelContainer: NSObject {
         }
     }
 
-    func refreshStatus() {
+    func refreshStatus(source: String = "refreshStatus") {
         if (status == .restarting) || (status == .waiting && tunnelProvider.connection.status == .disconnected) {
             wg_log(.info, message: "Tunnel '\(name)' is not yet active [\(status), \(tunnelProvider.connection.status)]. Skip sending the pending start login over.")
             return
         }
-        status = TunnelStatus(from: tunnelProvider.connection.status)
-        wg_log(.debug, message: "Status callback = \(String(describing: TunnelsManager.onStatusChange))(\(status))")
-        TunnelsManager.onStatusChange?(name, "\(status)")
+        let previousStatus = status
+        let systemStatus = tunnelProvider.connection.status
+        status = TunnelStatus(from: systemStatus)
+        let context = TunnelStatusChangeContext(
+            source: source,
+            previousStatus: "\(previousStatus)",
+            systemStatus: "\(systemStatus)"
+        )
+        wg_log(.debug, message: "Status callback source=\(source) previous=\(previousStatus) system=\(systemStatus) mapped=\(status) callback=\(String(describing: TunnelsManager.onStatusChange))")
+        TunnelsManager.onStatusChange?(name, "\(status)", context)
     }
 
     fileprivate func startActivation(recursionCount: UInt = 0, lastError: Error? = nil, activationDelegate: TunnelsManagerActivationDelegate?) {
@@ -824,7 +841,7 @@ class TunnelContainer: NSObject {
     }
 
     fileprivate func startDeactivation() {
-        wg_log(.debug, message: "startDeactivation: Tunnel: \(name)")
+        wg_log(.debug, message: "[peerMessage] app requested stopTunnel via startDeactivation tunnel=\(name) connectionStatus=\(tunnelProvider.connection.status)")
         (tunnelProvider.connection as? NETunnelProviderSession)?.stopTunnel()
     }
 }
@@ -924,21 +941,30 @@ extension TunnelsManager {
 }
 
 private extension TunnelContainer {
-    func sendProviderMessage(_ messageData: Data, responseHandler: ((Data?) -> Void)? = nil) {
+    func sendProviderMessage(_ messageData: Data, command: String? = nil, responseHandler: ((Data?) -> Void)? = nil) {
         guard let session = tunnelProvider.connection as? NETunnelProviderSession else {
-            errorLog("Tunnel is not ready to send message to the network extension")
+            errorLog("[peerMessage] provider message failed: missing NETunnelProviderSession command=\(command ?? "<unknown>") bytes=\(messageData.count)")
             responseHandler?(nil)
             return
         }
         guard session.status == .connected else {
-            infoLog("Tunnel not yet connected or active. Ignore message sending")
+            infoLog("[peerMessage] provider message skipped: session status=\(session.status) command=\(command ?? "<unknown>") bytes=\(messageData.count)")
             responseHandler?(nil)
             return
         }
+        debugLog("[peerMessage] provider message send command=\(command ?? "<unknown>") status=\(session.status) bytes=\(messageData.count)")
         do {
-            try session.sendProviderMessage(messageData, responseHandler: responseHandler)
+            try session.sendProviderMessage(messageData, responseHandler: { data in
+                if let data {
+                    let response = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                    debugLog("[peerMessage] provider message response command=\(command ?? "<unknown>") bytes=\(data.count) response=\(response)")
+                } else {
+                    infoLog("[peerMessage] provider message nil response command=\(command ?? "<unknown>")")
+                }
+                responseHandler?(data)
+            })
         } catch {
-            errorLog("send error: \(error)")
+            errorLog("[peerMessage] provider message send error command=\(command ?? "<unknown>") status=\(session.status) error=\(error)")
             responseHandler?(nil)
         }
     }
@@ -950,7 +976,7 @@ private extension TunnelContainer {
             completionHandler("failed to encode json")
             return
         }
-        sendProviderMessage(jsonData) { data in
+        sendProviderMessage(jsonData, command: cmd) { data in
             guard let data = data else {
                 completionHandler("failed to get response data")
                 return

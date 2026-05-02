@@ -369,7 +369,7 @@ func wgSendCommand(cmd *C.char, args *C.char) *C.char {
 		}
 		return C.CString(result)
 	case <-ctx.Done():
-		log.Printf("[ERROR] send command '%v' timed out after 5 seconds", goCmd)
+		log.Printf("[ERROR] send command '%v' timed out after %v", goCmd, timeout)
 		return C.CString("Error: command timed out")
 	}
 }

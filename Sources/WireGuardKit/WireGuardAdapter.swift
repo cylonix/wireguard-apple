@@ -41,6 +41,17 @@ private enum State {
 
     /// The tunnel is temporarily shutdown due to device going offline
     case temporaryShutdown(_ settingsGenerator: PacketTunnelSettingsGenerator)
+
+    var lifecycleLogDescription: String {
+        switch self {
+        case .stopped:
+            return "stopped"
+        case .started(let handle, _):
+            return "started(handle=\(handle))"
+        case .temporaryShutdown:
+            return "temporaryShutdown"
+        }
+    }
 }
 
 struct WireGuardNetworkSettingsConfig: Codable {
@@ -244,14 +255,18 @@ public class WireGuardAdapter {
     /// - Parameter completionHandler: completion handler.
     public func stop(completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
         workQueue.async {
+            wg_log(.info, message: "[peerMessage] WireGuardAdapter.stop begin state=\(self.state.lifecycleLogDescription)")
             switch self.state {
             case .started(let handle, _):
+                wg_log(.info, message: "[peerMessage] WireGuardAdapter.stop calling wgTurnOff handle=\(handle)")
                 wgTurnOff(handle)
 
             case .temporaryShutdown:
+                wg_log(.info, staticMessage: "[peerMessage] WireGuardAdapter.stop temporaryShutdown; wgTurnOff already called by path monitor")
                 break
 
             case .stopped:
+                wg_log(.info, staticMessage: "[peerMessage] WireGuardAdapter.stop ignored; already stopped")
                 completionHandler(.invalidState)
                 return
             }
@@ -261,6 +276,7 @@ public class WireGuardAdapter {
 
             self.state = .stopped
 
+            wg_log(.info, staticMessage: "[peerMessage] WireGuardAdapter.stop completed")
             completionHandler(nil)
         }
     }
@@ -519,6 +535,7 @@ public class WireGuardAdapter {
                 )
             } catch {
                 self.logHandler(.error, "Restart failed: \(error.localizedDescription). Hard resetting")
+                wg_log(.error, message: "[peerMessage] WireGuardAdapter cancelTunnelWithError after restart failure: \(error.localizedDescription)")
                 self.packetTunnelProvider?.cancelTunnelWithError(error)
             }
 

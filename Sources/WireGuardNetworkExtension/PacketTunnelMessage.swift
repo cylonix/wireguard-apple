@@ -7,6 +7,7 @@ enum PacketTunnelMessage {
   static let share = prefix + "share"
   static let tailchat = prefix + "tailchat"
   static let peerMessage = prefix + "peerMessage"
+  static let backendLivenessProbe = prefix + "backendLivenessProbe"
 }
 
 enum PacketTunnelNotification {
@@ -16,6 +17,7 @@ enum PacketTunnelNotification {
   static let ipnNotify = "io.cylonix.sase.tunnelNotification.ipnNotify"
   static let peerMessageReceived = "io.cylonix.sase.tunnelNotification.peerMessageReceived"
   static let userNotification = "io.cylonix.sase.tunnelNotification.userNotification"
+  static let backendLivenessProbeResponse = "io.cylonix.sase.tunnelNotification.backendLivenessProbeResponse"
 }
 
 enum PacketTunnelUserDefaultsKey {
@@ -26,4 +28,12 @@ enum PacketTunnelUserDefaultsKey {
     static let peerMessageReceived = "PeerMessageReceived"
     static let autoSavedFilesByTransferID = "AutoSavedFilesByTransferID"
     static let notificationPreviewEnabled = "NotificationPreviewEnabled"
+    static let backendLivenessProbeRequestID = "BackendLivenessProbeRequestID"
+    static let backendLivenessProbeRequestAtUs = "BackendLivenessProbeRequestAtUs"
+    static let backendLivenessProbeResponseID = "BackendLivenessProbeResponseID"
+    static let backendLivenessProbeResponseAtUs = "BackendLivenessProbeResponseAtUs"
+    static let backendLivenessProbeAlive = "BackendLivenessProbeAlive"
+    static let backendLivenessProbeBackendState = "BackendLivenessProbeBackendState"
+    static let backendLivenessProbeError = "BackendLivenessProbeError"
+    static let backendLivenessProbeProviderStopping = "BackendLivenessProbeProviderStopping"
 }

@@ -37,6 +37,7 @@ const (
 	tailchatStateKey = ipn.StateKey("_tailchat")
 
 	sendFilesToPeerCmd = "send_files_to_peer"
+	sendPeerMessageCmd = "send_peer_message"
 )
 
 var (
@@ -55,6 +56,7 @@ var (
 )
 
 func initCylonixBackend(tunFd int32) int32 {
+	clogf("[peerMessage] initCylonixBackend called tunFd=%d savedTunFd=%d initialized=%v appNil=%v serviceNil=%v", tunFd, savedTunFd, cylonixInitDone, app == nil, service == nil)
 	if !cylonixInitDone {
 		cylonixInitDone = true
 		if err := cylonixInit(); err != nil {
@@ -64,18 +66,19 @@ func initCylonixBackend(tunFd int32) int32 {
 	}
 	if savedTunFd != -1 {
 		if savedTunFd == tunFd {
-			clogf("Same as the saved fd. Skip update")
+			clogf("[peerMessage] initCylonixBackend skip LocalBackend start: same saved tunFd=%d serviceNil=%v appNil=%v", tunFd, service == nil, app == nil)
 			return 0
 		}
-		clogf("Saved fd=%v. Cannot handle this", savedTunFd)
+		clogf("[peerMessage] initCylonixBackend failed before LocalBackend start: savedTunFd=%d newTunFd=%d serviceNil=%v appNil=%v", savedTunFd, tunFd, service == nil, app == nil)
 		return -1
 	}
 	go func() {
-		clogf("Requesting to start VPN")
+		clogf("[peerMessage] Requesting LocalBackend VPN service start tunFd=%d", tunFd)
 		requestVPN(int32(tunFd))
-		clogf("Requested to start VPN")
+		clogf("[peerMessage] Requested LocalBackend VPN service start tunFd=%d serviceNil=%v", tunFd, service == nil)
 	}()
 	savedTunFd = tunFd
+	clogf("[peerMessage] initCylonixBackend saved tunFd=%d", savedTunFd)
 	return 0
 }
 
@@ -838,7 +841,7 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error sending files to peer: %v", err)
 		}
 		return "Success: " + result
-	case "send_peer_message":
+	case sendPeerMessageCmd:
 		var result ipnlocal.PeerMessageSendResult
 		if err := client.SendPeerMessage([]byte(args), &result); err != nil {
 			return fmt.Sprintf("Error sending peerMessage: %v", err)
@@ -912,8 +915,11 @@ func handleCommand(cmd, args string) string {
 }
 
 func getCmdTimeout(cmd string) time.Duration {
-	if cmd == sendFilesToPeerCmd {
+	switch cmd {
+	case sendFilesToPeerCmd:
 		return 24 * time.Hour
+	case sendPeerMessageCmd:
+		return 20 * time.Second
 	}
 	// Default timeout for commands
 	return 5 * time.Second
@@ -1140,6 +1146,7 @@ func (s *ipnService) NewBuilder() libtailscale.VPNServiceBuilder {
 
 func (s *ipnService) Close() {
 	// Set network setting to nil
+	clogf("[peerMessage] ipnService.Close id=%s cachedNetworkSettingsNil=%v savedTunFd=%d", s.ID(), cachedNetworkSettings == nil, savedTunFd)
 	clogf("Closing VPN service. Clearing network settings.")
 	if err := setNetworkSettings(NetworkSettings{}); err != nil {
 		clogf("Failed to clear network settings: %v", err)
@@ -1149,18 +1156,28 @@ func (s *ipnService) Close() {
 func (s *ipnService) DisconnectVPN() {
 	// not-implemented yet.
 	// Send packet tunnel update?
+	clogf("[peerMessage] ipnService.DisconnectVPN id=%s cachedNetworkSettingsNil=%v savedTunFd=%d", s.ID(), cachedNetworkSettings == nil, savedTunFd)
 }
 
 func (s *ipnService) UpdateVpnStatus(bool) {
 	// Send packet tunnel update?
+	clogf("[peerMessage] ipnService.UpdateVpnStatus id=%s", s.ID())
 }
 
 func requestVPN(fd int32) {
+	clogf("[peerMessage] requestVPN enter fd=%d oldServiceNil=%v savedTunFd=%d", fd, service == nil, savedTunFd)
 	service = newIPNService(fd)
+	clogf("[peerMessage] requestVPN posting service id=%s fd=%d", service.ID(), fd)
 	libtailscale.RequestVPN(service)
+	clogf("[peerMessage] requestVPN posted service id=%s fd=%d", service.ID(), fd)
 }
 
 func turnOffVPN() error {
+	serviceID := "<nil>"
+	if service != nil {
+		serviceID = service.ID()
+	}
+	clogf("[peerMessage] turnOffVPN enter service=%s cachedNetworkSettingsNil=%v savedTunFd=%d", serviceID, cachedNetworkSettings == nil, savedTunFd)
 	if service == nil {
 		clogf("Turn off VPN skipped: not started before.")
 		return fmt.Errorf("vpn service has not started")
@@ -1170,6 +1187,7 @@ func turnOffVPN() error {
 		return nil
 	}
 	clogf("Turn off VPN: skip clearing network settings.")
+	clogf("[peerMessage] turnOffVPN leaving LocalBackend service connected; ServiceDisconnect is currently disabled service=%s", serviceID)
 	//log.Printf("Disconnecting VPN service: %v", service.ID())
 	//libtailscale.ServiceDisconnect(service)
 	return nil
