@@ -144,6 +144,13 @@ type Application interface {
 	// NotificationManager allows the watcher to stop watching.
 	WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFile)) NotificationManager
 
+	// WatchDirectReceivedFiles registers a callback that fires once per
+	// successfully received file in DirectFileMode (where the staging-mode
+	// FilesWaiting / WaitingFiles flow no longer surfaces arrivals).
+	// The callback runs on the manager's goroutine; the host should fan
+	// out quickly.
+	WatchDirectReceivedFiles(cb func(baseName, finalPath, transferID string)) NotificationManager
+
 	// GetTailDropFilePath gets a taildrop file path base on the filename.
 	// Basically exposing the taildrop GetFillePath method.
 	GetTailDropFilePath(filename string) (string, error)

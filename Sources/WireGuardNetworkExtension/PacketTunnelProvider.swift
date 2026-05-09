@@ -65,7 +65,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         setupBackendLivenessProbeObserver()
 
         wg_log(.info, message: "Starting tunnel from the " + (activationAttemptId == nil ? "OS directly, rather than the app" : "app"))
-        wg_log(.info, message: "[peerMessage] packetTunnel startTunnel activationAttemptId=\(activationAttemptId ?? "") optionsKeys=\((options ?? [:]).keys.sorted())")
+        wg_log(.info, message: "packetTunnel startTunnel activationAttemptId=\(activationAttemptId ?? "") optionsKeys=\((options ?? [:]).keys.sorted())")
 
         checkOnDemandSettingsOnStart(activationAttemptId) // __CYLONIX_MOD__
         guard let tunnelProviderProtocol = protocolConfiguration as? NETunnelProviderProtocol,
@@ -84,7 +84,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let interfaceName = self.adapter.interfaceName ?? "unknown"
 
                 wg_log(.info, message: "Tunnel interface is \(interfaceName)")
-                wg_log(.info, message: "[peerMessage] packetTunnel startTunnel success interface=\(interfaceName)")
+                wg_log(.info, message: "packetTunnel startTunnel success interface=\(interfaceName)")
 
                 completionHandler(nil)
                 return
@@ -127,22 +127,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         setProviderStopping(true)
         wg_log(.info, message: "Stopping tunnel due to \(reason)")
-        wg_log(.info, message: "[peerMessage] packetTunnel stopTunnel reason=\(reason) raw=\(reason.rawValue) activeCommands=\(activeAppCommandSummary())")
+        wg_log(.info, message: "packetTunnel stopTunnel reason=\(reason) raw=\(reason.rawValue) activeCommands=\(activeAppCommandSummary())")
 
         checkOnDemandSettingsOnStop(reason: reason, completionHandler: completionHandler) // __CYLONIX_MOD__
     }
 
     private func completeStop(_ completionHandler: @escaping () -> Void) {
-        wg_log(.info, message: "[peerMessage] packetTunnel completeStop begin activeCommands=\(activeAppCommandSummary())")
+        wg_log(.info, message: "packetTunnel completeStop begin activeCommands=\(activeAppCommandSummary())")
         adapter.stop { error in
             ErrorNotifier.removeLastErrorFile()
 
             if let error = error {
                 wg_log(.error, message: "Failed to stop WireGuard adapter: \(error.localizedDescription)")
             }
-            wg_log(.info, message: "[peerMessage] packetTunnel completeStop adapter stopped error=\(String(describing: error)) activeCommands=\(self.activeAppCommandSummary())")
+            wg_log(.info, message: "packetTunnel completeStop adapter stopped error=\(String(describing: error)) activeCommands=\(self.activeAppCommandSummary())")
             completionHandler()
-            wg_log(.info, staticMessage: "[peerMessage] packetTunnel completeStop completionHandler returned")
+            wg_log(.info, staticMessage: "packetTunnel completeStop completionHandler returned")
 
             #if os(macOS)
                 // HACK: This is a filthy hack to work around Apple bug 32073323 (dup'd by us as 47526107).
@@ -259,11 +259,11 @@ extension PacketTunnelProvider {
 
     private func checkOnDemandSettingsOnStop(reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         if !canLoadVPNConfig() {
-            wg_log(.info, message: "[peerMessage] packetTunnel stop on-demand check skipped reason=\(reason) raw=\(reason.rawValue)")
+            wg_log(.info, message: "packetTunnel stop on-demand check skipped reason=\(reason) raw=\(reason.rawValue)")
             return
         }
         if reason != .userInitiated {
-            wg_log(.info, message: "[peerMessage] packetTunnel stop is not userInitiated; completing stop reason=\(reason) raw=\(reason.rawValue)")
+            wg_log(.info, message: "packetTunnel stop is not userInitiated; completing stop reason=\(reason) raw=\(reason.rawValue)")
             completeStop(completionHandler)
             return
         }
@@ -274,7 +274,7 @@ extension PacketTunnelProvider {
             return
         }
         // Get our specific tunnel manager using our bundle ID
-        wg_log(.info, staticMessage: "[peerMessage] packetTunnel stop loading managers for userInitiated stop")
+        wg_log(.info, staticMessage: "packetTunnel stop loading managers for userInitiated stop")
         NETunnelProviderManager.loadAllFromPreferences { managers, error in
             // Check if we have an error
             if let error = error {
@@ -293,7 +293,7 @@ extension PacketTunnelProvider {
                 return
             }
 
-            wg_log(.info, message: "[peerMessage] packetTunnel stop manager found onDemand=\(ourManager.isOnDemandEnabled) enabled=\(ourManager.isEnabled)")
+            wg_log(.info, message: "packetTunnel stop manager found onDemand=\(ourManager.isOnDemandEnabled) enabled=\(ourManager.isEnabled)")
             if !ourManager.isOnDemandEnabled {
                 wg_log(.info, message: "On-demand was already disabled from system settings")
                 self.completeStop(completionHandler)
@@ -335,7 +335,7 @@ extension PacketTunnelProvider {
             nil,
             .deliverImmediately
         )
-        wg_log(.info, message: "[peerMessage] packetTunnel backend liveness observer installed")
+        wg_log(.info, message: "packetTunnel backend liveness observer installed")
     }
 
     private func removeBackendLivenessProbeObserver() {
@@ -358,7 +358,7 @@ extension PacketTunnelProvider {
             guard let appGroupId = FileManager.appGroupId,
                   let defaults = UserDefaults(suiteName: appGroupId)
             else {
-                wg_log(.error, message: "[peerMessage] backend liveness probe failed: app group defaults unavailable")
+                wg_log(.error, message: "backend liveness probe failed: app group defaults unavailable")
                 return
             }
 
@@ -397,7 +397,7 @@ extension PacketTunnelProvider {
             defaults.set(stopping, forKey: PacketTunnelUserDefaultsKey.backendLivenessProbeProviderStopping)
             defaults.synchronize()
 
-            wg_log(.info, message: "[peerMessage] backend liveness probe response id=\(requestID) alive=\(alive) backendState=\(backendState) stopping=\(stopping) error=\(error) requestAgeUs=\(Int64(nowUs - requestAtUs))")
+            wg_log(.info, message: "backend liveness probe response id=\(requestID) alive=\(alive) backendState=\(backendState) stopping=\(stopping) error=\(error) requestAgeUs=\(Int64(nowUs - requestAtUs))")
             CFNotificationCenterPostNotification(
                 CFNotificationCenterGetDarwinNotifyCenter(),
                 CFNotificationName(PacketTunnelNotification.backendLivenessProbeResponse as CFString),
@@ -412,7 +412,7 @@ extension PacketTunnelProvider {
         let commandID = UUID().uuidString
         let startedAt = Date()
         registerAppCommand(id: commandID, method: method, startedAt: startedAt)
-        wg_log(.info, message: "[peerMessage] packetTunnel app command start id=\(commandID) method=\(method) argsBytes=\(args.utf8.count) hasCompletion=\(completionHandler != nil)")
+        wg_log(.info, message: "packetTunnel app command start id=\(commandID) method=\(method) argsBytes=\(args.utf8.count) hasCompletion=\(completionHandler != nil)")
         let appCmdQueue = DispatchQueue(label: "io.cylonix.sase.wireguard.appCmdQueue", qos: .userInitiated)
         appCmdQueue.async {
             var ret = "Failed to send command '\(method)' to service"
@@ -421,16 +421,16 @@ extension PacketTunnelProvider {
                 free(result)
             }
             let elapsed = Date().timeIntervalSince(startedAt)
-            wg_log(.info, message: "[peerMessage] packetTunnel app command result id=\(commandID) method=\(method) elapsedMs=\(Int(elapsed * 1000)) resultBytes=\(ret.utf8.count) resultPrefix=\(String(ret.prefix(160)))")
+            wg_log(.info, message: "packetTunnel app command result id=\(commandID) method=\(method) elapsedMs=\(Int(elapsed * 1000)) resultBytes=\(ret.utf8.count) resultPrefix=\(String(ret.prefix(160)))")
             self.unregisterAppCommand(id: commandID)
             if let completionHandler = completionHandler {
                 if let data = ret.data(using: .utf8) {
                     completionHandler(data)
-                    wg_log(.info, message: "[peerMessage] packetTunnel app command completion id=\(commandID) method=\(method) bytes=\(data.count)")
+                    wg_log(.info, message: "packetTunnel app command completion id=\(commandID) method=\(method) bytes=\(data.count)")
                 } else {
                     wg_log(.error, message: "Failed to handle app command: \(method) with args: \(args): failed to convert response to Data")
                     completionHandler(nil)
-                    wg_log(.info, message: "[peerMessage] packetTunnel app command completion id=\(commandID) method=\(method) bytes=nil")
+                    wg_log(.info, message: "packetTunnel app command completion id=\(commandID) method=\(method) bytes=nil")
                 }
             }
         }

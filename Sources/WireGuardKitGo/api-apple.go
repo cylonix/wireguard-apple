@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -122,14 +123,16 @@ func wgSetLogger(context, loggerFn uintptr) {
 		log.SetOutput(&wgLogWriter{})
 	}
 	debug.SetGCPercent(10)
+	startInit()
 }
 
 var (
 	useCylonixBackend = true
-	turnOnProfiling   = false
+	turnOnProfiling   = true
 	groupFolder       string
 	systemInfo        SystemInfo
 	errorLogf         = CLogger(1).Printf
+	pprofOnce         sync.Once
 )
 
 type SystemInfo struct {
@@ -409,25 +412,44 @@ func callWgAdapter(method, args string, bufSize int) ([]byte, error) {
 
 // __END_CYLONIX_ADD__
 
-func main() {
-	log.Printf("starting the network extension go routine")
+func startPprofService() {
+	if !turnOnProfiling {
+		log.Println("turnOnProfiling is false. Not starting pprof")
+		return
+	}
+	log.Println("Starting a go routine to start pprof...")
+	pprofOnce.Do(func() {
+		go func() {
+			log.Println("Starting pprof service on 0.0.0.0:6060")
+			log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+		}()
+	})
+}
+
+func startInit() {
+	log.Printf("main(): starting the network extension go routine")
 	// We aren't very performance sensitive, and the parts that are
 	// performance sensitive (wireguard) try hard not to do any memory
 	// allocations. So let's be aggressive about garbage collection,
 	// unless the user specifically overrides it in the usual way.
 	if _, ok := os.LookupEnv("GOGC"); !ok {
 		debug.SetGCPercent(10)
+		log.Println("main(): set GC percent to 10")
+	} else {
+		log.Println("main(): not setting GC percent")
 	}
+
+	log.Println("main(): set memory limit to 40MB")
+	debug.SetMemoryLimit(40 * 1024 * 1024)
 
 	// Refer to https://tailscale.com/blog/go-linker/
 	// Although we are getting 50MB in ios 15.1, it is worth to make versions
 	// older that has 15MB network extension memory limit works too.
 	// Set max proc to 1.
-	//runtime.GOMAXPROCS(1)
-	if turnOnProfiling {
-		go func() {
-			log.Println("Starting pprof service")
-			log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-		}()
-	}
+	runtime.GOMAXPROCS(1)
+	startPprofService()
+}
+
+func main() {
+	// No-op
 }

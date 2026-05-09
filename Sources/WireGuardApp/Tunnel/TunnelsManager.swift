@@ -351,7 +351,7 @@ class TunnelsManager {
                 if tunnel.status == .active || tunnel.status == .activating || tunnel.status == .reasserting {
                     // Turn off the tunnel, and then turn it back on, so the changes are made effective
                     tunnel.status = .restarting
-                    wg_log(.info, message: "[peerMessage] app requested stopTunnel due to config change tunnel=\(tunnel.name) connectionStatus=\(tunnel.tunnelProvider.connection.status)")
+                    wg_log(.info, message: "app requested stopTunnel due to config change tunnel=\(tunnel.name) connectionStatus=\(tunnel.tunnelProvider.connection.status)")
                     (tunnel.tunnelProvider.connection as? NETunnelProviderSession)?.stopTunnel()
                 }
             }
@@ -841,7 +841,7 @@ class TunnelContainer: NSObject {
     }
 
     fileprivate func startDeactivation() {
-        wg_log(.debug, message: "[peerMessage] app requested stopTunnel via startDeactivation tunnel=\(name) connectionStatus=\(tunnelProvider.connection.status)")
+        wg_log(.debug, message: "app requested stopTunnel via startDeactivation tunnel=\(name) connectionStatus=\(tunnelProvider.connection.status)")
         (tunnelProvider.connection as? NETunnelProviderSession)?.stopTunnel()
     }
 }
@@ -943,28 +943,26 @@ extension TunnelsManager {
 private extension TunnelContainer {
     func sendProviderMessage(_ messageData: Data, command: String? = nil, responseHandler: ((Data?) -> Void)? = nil) {
         guard let session = tunnelProvider.connection as? NETunnelProviderSession else {
-            errorLog("[peerMessage] provider message failed: missing NETunnelProviderSession command=\(command ?? "<unknown>") bytes=\(messageData.count)")
+            errorLog("provider message failed: missing NETunnelProviderSession command=\(command ?? "<unknown>") bytes=\(messageData.count)")
             responseHandler?(nil)
             return
         }
         guard session.status == .connected else {
-            infoLog("[peerMessage] provider message skipped: session status=\(session.status) command=\(command ?? "<unknown>") bytes=\(messageData.count)")
+            infoLog("provider message skipped: session status=\(session.status) command=\(command ?? "<unknown>") bytes=\(messageData.count)")
             responseHandler?(nil)
             return
         }
-        debugLog("[peerMessage] provider message send command=\(command ?? "<unknown>") status=\(session.status) bytes=\(messageData.count)")
         do {
             try session.sendProviderMessage(messageData, responseHandler: { data in
                 if let data {
                     let response = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                    debugLog("[peerMessage] provider message response command=\(command ?? "<unknown>") bytes=\(data.count) response=\(response)")
                 } else {
-                    infoLog("[peerMessage] provider message nil response command=\(command ?? "<unknown>")")
+                    infoLog("provider message nil response command=\(command ?? "<unknown>")")
                 }
                 responseHandler?(data)
             })
         } catch {
-            errorLog("[peerMessage] provider message send error command=\(command ?? "<unknown>") status=\(session.status) error=\(error)")
+            errorLog("provider message send error command=\(command ?? "<unknown>") status=\(session.status) error=\(error)")
             responseHandler?(nil)
         }
     }

@@ -171,6 +171,49 @@ func (app *App) WatchAwaitingFiles(cb func(dir string, files []apitype.WaitingFi
 }
 
 // __BEGIN_CYLONIX_ADD__
+// WatchDirectReceivedFiles registers a per-Extension hook that fires
+// once when a file is finalized in DirectFileMode. The callback returns
+// (baseName, finalPath, transferID); transferID is non-empty only when
+// the sender attached a cylonix peer-message X-Cylonix-Transfer-ID
+// header.
+//
+// Hosts wire this to a "files received" notification path; in direct
+// mode the legacy WatchAwaitingFiles loop sees nothing because
+// manager.WaitingFiles() returns nil there.
+func (app *App) WatchDirectReceivedFiles(cb func(baseName, finalPath, transferID string)) NotificationManager {
+	app.ready.Wait()
+	log.Printf("WatchDirectReceivedFiles: start")
+	ctx, cancel := context.WithCancel(context.Background())
+	nm := &notificationManager{name: "WatchDirectReceivedFiles", cancel: cancel}
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Printf("panic in WatchDirectReceivedFiles %s: %s", p, debug.Stack())
+				panic(p)
+			}
+		}()
+		ext, _ := ipnlocal.GetExt[*taildrop.Extension](app.backend)
+		if ext == nil {
+			log.Printf("WatchDirectReceivedFiles: taildrop extension not registered")
+			return
+		}
+		ext.SetCylonixDirectReceiveHook(func(baseName, finalPath, transferID string) {
+			defer func() {
+				if p := recover(); p != nil {
+					log.Printf("panic in WatchDirectReceivedFiles cb: %s", p)
+				}
+			}()
+			cb(baseName, finalPath, transferID)
+		})
+		<-ctx.Done()
+		// Best-effort unregister; if the extension has been replaced
+		// there's nothing else to do.
+		ext.SetCylonixDirectReceiveHook(nil)
+		log.Printf("WatchDirectReceivedFiles: done")
+	}()
+	return nm
+}
+
 // stagingFilesDir reproduces the staging-mode path that
 // feature/taildrop/ext.go fileRoot() builds when SetDirectFileRoot has
 // not been called: <TailscaleVarRoot>/files/<login>-uid-<uid>.

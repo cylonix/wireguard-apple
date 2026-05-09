@@ -43,6 +43,7 @@ const (
 	endpointTailfsServerAddr  = "tailfs/fileserver-address"
 	endpointEnableExitNode    = "set-use-exit-node-enabled"
 	endpointPeerMessageSend   = "peer-message/send"
+	endpointActivePeers       = "peer-message/active-peers"
 )
 
 type Client struct {
@@ -79,6 +80,27 @@ func (c *Client) Start(optionsJsonString string) error {
 
 func (c *Client) SendPeerMessage(payload []byte, result interface{}) error {
 	return c.post(endpointPeerMessageSend, 15000, payload, result)
+}
+
+// SetActivePeers refreshes the daemon's "active peers" set used by the
+// peer-message warm/keepalive loop. Caller must reissue periodically (every
+// 60s) to keep the set alive; the daemon auto-clears after ~3 min idle.
+func (c *Client) SetActivePeers(peerIDs []string) error {
+	if peerIDs == nil {
+		peerIDs = []string{}
+	}
+	body, err := json.Marshal(struct {
+		PeerIDs []string `json:"peer_ids"`
+	}{PeerIDs: peerIDs})
+	if err != nil {
+		return err
+	}
+	return c.post(endpointActivePeers, 5000, body, nil)
+}
+
+// ClearActivePeers releases the active-peer set immediately.
+func (c *Client) ClearActivePeers() error {
+	return c.delete(endpointActivePeers, nil, nil)
 }
 
 func (c *Client) StartLoginInteractive() error {

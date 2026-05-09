@@ -14,9 +14,12 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -36,8 +39,13 @@ const (
 
 	tailchatStateKey = ipn.StateKey("_tailchat")
 
-	sendFilesToPeerCmd = "send_files_to_peer"
-	sendPeerMessageCmd = "send_peer_message"
+	sendFilesToPeerCmd  = "send_files_to_peer"
+	sendPeerMessageCmd  = "send_peer_message"
+	setActivePeersCmd   = "set_active_peers"
+	clearActivePeersCmd = "clear_active_peers"
+
+	ipnNotificationPayloadDir = "ipn_notification_payloads"
+	debugProfileDir           = "debug_profiles"
 )
 
 var (
@@ -46,17 +54,19 @@ var (
 	clogf                 = logger.WithPrefix(CLogger(0).Printf, "[Cylonix]: ")
 	cylonixInitDone       = false
 	filesWaitingManager   libtailscale.NotificationManager
+	directReceivedManager libtailscale.NotificationManager
 	notifyManager         libtailscale.NotificationManager
 	savedTunFd            int32 = -1
 	service               *ipnService
 	store                 *stateStore
 	lastNotify            string
+	ipnNotifySeq          uint64
 
 	errKeychainItemNotFound = errors.New("keychain item not found")
 )
 
 func initCylonixBackend(tunFd int32) int32 {
-	clogf("[peerMessage] initCylonixBackend called tunFd=%d savedTunFd=%d initialized=%v appNil=%v serviceNil=%v", tunFd, savedTunFd, cylonixInitDone, app == nil, service == nil)
+	clogf("initCylonixBackend called tunFd=%d savedTunFd=%d initialized=%v appNil=%v serviceNil=%v", tunFd, savedTunFd, cylonixInitDone, app == nil, service == nil)
 	if !cylonixInitDone {
 		cylonixInitDone = true
 		if err := cylonixInit(); err != nil {
@@ -66,19 +76,19 @@ func initCylonixBackend(tunFd int32) int32 {
 	}
 	if savedTunFd != -1 {
 		if savedTunFd == tunFd {
-			clogf("[peerMessage] initCylonixBackend skip LocalBackend start: same saved tunFd=%d serviceNil=%v appNil=%v", tunFd, service == nil, app == nil)
+			clogf("initCylonixBackend skip LocalBackend start: same saved tunFd=%d serviceNil=%v appNil=%v", tunFd, service == nil, app == nil)
 			return 0
 		}
-		clogf("[peerMessage] initCylonixBackend failed before LocalBackend start: savedTunFd=%d newTunFd=%d serviceNil=%v appNil=%v", savedTunFd, tunFd, service == nil, app == nil)
+		clogf("initCylonixBackend failed before LocalBackend start: savedTunFd=%d newTunFd=%d serviceNil=%v appNil=%v", savedTunFd, tunFd, service == nil, app == nil)
 		return -1
 	}
 	go func() {
-		clogf("[peerMessage] Requesting LocalBackend VPN service start tunFd=%d", tunFd)
+		clogf("Requesting LocalBackend VPN service start tunFd=%d", tunFd)
 		requestVPN(int32(tunFd))
-		clogf("[peerMessage] Requested LocalBackend VPN service start tunFd=%d serviceNil=%v", tunFd, service == nil)
+		clogf("Requested LocalBackend VPN service start tunFd=%d serviceNil=%v", tunFd, service == nil)
 	}()
 	savedTunFd = tunFd
-	clogf("[peerMessage] initCylonixBackend saved tunFd=%d", savedTunFd)
+	clogf("initCylonixBackend saved tunFd=%d", savedTunFd)
 	return 0
 }
 
@@ -129,26 +139,168 @@ func peerMessageEvent(message string) {
 	}
 }
 
-func ipnNotify(caller, message string) error {
-	lastNotify = message
-	envelope, err := json.Marshal(struct {
+func writeIPNNotificationPayload(payload []byte) (string, error) {
+	if groupFolder == "" {
+		return "", fmt.Errorf("container path not set")
+	}
+	dir := filepath.Join(groupFolder, ipnNotificationPayloadDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("create ipn notification payload dir: %w", err)
+	}
+	seq := atomic.AddUint64(&ipnNotifySeq, 1)
+	name := fmt.Sprintf("%d-%d.json", time.Now().UnixMicro(), seq)
+	tmp := filepath.Join(dir, "."+name+".tmp")
+	dst := filepath.Join(dir, name)
+	if err := os.WriteFile(tmp, payload, 0600); err != nil {
+		return "", fmt.Errorf("write ipn notification payload: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("rename ipn notification payload: %w", err)
+	}
+	return name, nil
+}
+
+func ipnNotifyBytes(caller string, payload []byte) error {
+	lastNotify = string(payload)
+	envelope := struct {
 		Caller       string `json:"caller"`
 		EnqueuedAtUs int64  `json:"enqueuedAtUs"`
-		Notification string `json:"notification"`
+		PayloadFile  string `json:"payloadFile,omitempty"`
+		PayloadBytes int    `json:"payloadBytes,omitempty"`
+		Notification string `json:"notification,omitempty"`
 	}{
 		Caller:       caller,
 		EnqueuedAtUs: time.Now().UnixMicro(),
-		Notification: message,
-	})
+		PayloadBytes: len(payload),
+	}
+
+	if payloadFile, err := writeIPNNotificationPayload(payload); err != nil {
+		// Fall back to the legacy in-envelope payload so notifications still
+		// reach the app if the shared container is temporarily unavailable.
+		clogf("Failed to write ipn notification payload file (caller=%s, bytes=%d): %v", caller, len(payload), err)
+		envelope.Notification = string(payload)
+	} else {
+		envelope.PayloadFile = payloadFile
+	}
+
+	data, err := json.Marshal(envelope)
 	if err != nil {
 		clogf("Failed to marshal ipn notify envelope: %v", err)
 		return fmt.Errorf("failed to marshal ipn notify envelope: %v", err)
 	}
-	if _, err := callWgAdapter("ipnNotify", string(envelope), 4096); err != nil {
+	if _, err := callWgAdapter("ipnNotify", string(data), 4096); err != nil {
 		clogf("Failed to notify ipn (caller=%s): %v", caller, err)
 		return fmt.Errorf("failed to notify ipn: %v", err)
 	}
 	return nil
+}
+
+func ipnNotify(caller, message string) error {
+	return ipnNotifyBytes(caller, []byte(message))
+}
+
+type debugPprofRequest struct {
+	Profile string `json:"profile"`
+	Debug   int    `json:"debug"`
+	GC      bool   `json:"gc"`
+}
+
+type debugPprofResult struct {
+	Profile      string `json:"profile"`
+	Path         string `json:"path"`
+	RelativePath string `json:"relativePath"`
+	Bytes        int64  `json:"bytes"`
+	HeapAlloc    uint64 `json:"heapAlloc"`
+	HeapSys      uint64 `json:"heapSys"`
+	HeapInuse    uint64 `json:"heapInuse"`
+	StackInuse   uint64 `json:"stackInuse"`
+	MSpanInuse   uint64 `json:"mspanInuse"`
+	MCacheInuse  uint64 `json:"mcacheInuse"`
+	OtherSys     uint64 `json:"otherSys"`
+	NextGC       uint64 `json:"nextGC"`
+	NumGC        uint32 `json:"numGC"`
+	NumGoroutine int    `json:"numGoroutine"`
+}
+
+func dumpDebugPprof(args string) (string, error) {
+	if groupFolder == "" {
+		return "", fmt.Errorf("container path not set")
+	}
+	req := debugPprofRequest{
+		Profile: "heap",
+		GC:      true,
+	}
+	if strings.TrimSpace(args) != "" {
+		if strings.HasPrefix(strings.TrimSpace(args), "{") {
+			if err := json.Unmarshal([]byte(args), &req); err != nil {
+				return "", fmt.Errorf("parse debug_pprof args: %w", err)
+			}
+		} else {
+			req.Profile = strings.TrimSpace(args)
+		}
+	}
+	if req.Profile == "" {
+		req.Profile = "heap"
+	}
+
+	profile := pprof.Lookup(req.Profile)
+	if profile == nil {
+		return "", fmt.Errorf("unknown pprof profile %q", req.Profile)
+	}
+	if req.GC && req.Profile == "heap" {
+		runtime.GC()
+	}
+
+	dir := filepath.Join(groupFolder, debugProfileDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("create debug profile directory: %w", err)
+	}
+	name := fmt.Sprintf("%s-%d.pprof", req.Profile, time.Now().UnixMicro())
+	relativePath := filepath.Join(debugProfileDir, name)
+	path := filepath.Join(groupFolder, relativePath)
+	f, err := os.Create(path)
+	if err != nil {
+		return "", fmt.Errorf("create debug profile: %w", err)
+	}
+	writeErr := profile.WriteTo(f, req.Debug)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("write %s profile: %w", req.Profile, writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close %s profile: %w", req.Profile, closeErr)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat debug profile: %w", err)
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	result := debugPprofResult{
+		Profile:      req.Profile,
+		Path:         path,
+		RelativePath: relativePath,
+		Bytes:        info.Size(),
+		HeapAlloc:    ms.HeapAlloc,
+		HeapSys:      ms.HeapSys,
+		HeapInuse:    ms.HeapInuse,
+		StackInuse:   ms.StackInuse,
+		MSpanInuse:   ms.MSpanInuse,
+		MCacheInuse:  ms.MCacheInuse,
+		OtherSys:     ms.OtherSys,
+		NextGC:       ms.NextGC,
+		NumGC:        ms.NumGC,
+		NumGoroutine: runtime.NumGoroutine(),
+	}
+	out, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("marshal debug profile result: %w", err)
+	}
+	clogf("debug_pprof wrote %s profile to %s bytes=%d heapAlloc=%d heapSys=%d heapInuse=%d goroutines=%d",
+		req.Profile, path, result.Bytes, result.HeapAlloc, result.HeapSys, result.HeapInuse, result.NumGoroutine)
+	return string(out), nil
 }
 
 func setNetworkSettings(settings NetworkSettings) error {
@@ -217,6 +369,8 @@ func setAlwaysUseRelay() {
 
 func cylonixInit() error {
 	clogf("%v Cylonix Init %v", dashes, dashes)
+	clogf("setting parallel xray connections to 1")
+	envknob.Setenv("TS_DERP_XRAY_CONN_COUNT", "1")
 	dataDir, err := getSharedAppGroupDir()
 	if err != nil {
 		return fmt.Errorf("failed to get shared app group dir: %w", err)
@@ -318,6 +472,11 @@ func cylonixInit() error {
 			filesWaitingManager.Stop()
 		}
 		filesWaitingManager = app.WatchAwaitingFiles(handleFilesWaiting)
+		if directReceivedManager != nil {
+			clogf("directReceivedManager is not nil. Stopping it before re-registering.")
+			directReceivedManager.Stop()
+		}
+		directReceivedManager = app.WatchDirectReceivedFiles(handleDirectReceivedFile)
 	}()
 	clogf("%v libtailscale started %v", dashes, dashes)
 	return nil
@@ -381,6 +540,34 @@ func handleFilesWaiting(dir string, files []apitype.WaitingFile) {
 		clogf("failed to marshal files waiting: %v", err)
 		return
 	}
+	filesWaiting(string(v))
+}
+
+// handleDirectReceivedFile reuses the existing filesWaiting Swift IPC to
+// surface a "files received" notification when the daemon is running in
+// DirectFileMode (where the staging-mode WatchAwaitingFiles polling
+// doesn't see arrivals because manager.WaitingFiles returns nil). The
+// JSON shape matches the staging path so the Swift adapter's
+// handleFilesWaiting can present the same UNNotification without a
+// second code path.
+func handleDirectReceivedFile(baseName, finalPath, transferID string) {
+	dir := filepath.Dir(finalPath)
+	wf := apitype.WaitingFile{Name: baseName}
+	if fi, err := os.Stat(finalPath); err == nil {
+		wf.Size = fi.Size()
+	}
+	// transferID is only set by cylonix peer-messaging sends. Reuse the
+	// same WaitingFile.ID slot the staging-mode flow uses; the Swift NE
+	// already understands this convention from BackgroundTaskManager.
+	if transferID != "" {
+		wf.ID = transferID
+	}
+	v, err := json.Marshal(&FilesWaiting{Dir: dir, Files: []apitype.WaitingFile{wf}})
+	if err != nil {
+		clogf("handleDirectReceivedFile: marshal failed: %v", err)
+		return
+	}
+	clogf("handleDirectReceivedFile: name=%q transferID=%q dir=%q", baseName, transferID, dir)
 	filesWaiting(string(v))
 }
 
@@ -599,7 +786,7 @@ func isClientDependantCmd(cmd string) bool {
 		return false
 	case "log", "get_env_knob", "set_env_knobs", "turn_off_vpn":
 		return false
-	case "debug_state_traces":
+	case "debug_state_traces", "debug_pprof":
 		return false
 	default:
 		return true
@@ -851,6 +1038,24 @@ func handleCommand(cmd, args string) string {
 			return fmt.Sprintf("Error marshaling peerMessage result: %v", err)
 		}
 		return string(encoded)
+	case setActivePeersCmd:
+		var msg struct {
+			PeerIDs []string `json:"peer_ids"`
+		}
+		if args != "" {
+			if err := json.Unmarshal([]byte(args), &msg); err != nil {
+				return fmt.Sprintf("Error parsing %v args: %v", setActivePeersCmd, err)
+			}
+		}
+		if err := client.SetActivePeers(msg.PeerIDs); err != nil {
+			return fmt.Sprintf("Error setting active peers: %v", err)
+		}
+		return "Success"
+	case clearActivePeersCmd:
+		if err := client.ClearActivePeers(); err != nil {
+			return fmt.Sprintf("Error clearing active peers: %v", err)
+		}
+		return "Success"
 	case "watch_notifications":
 		log.Println("Starting notification manager")
 		if notifyManager != nil {
@@ -909,6 +1114,12 @@ func handleCommand(cmd, args string) string {
 			return string(v)
 		}
 		return ipnlocal.CylonixFormatStateTraces()
+	case "debug_pprof":
+		result, err := dumpDebugPprof(args)
+		if err != nil {
+			return fmt.Sprintf("Error dumping pprof: %v", err)
+		}
+		return result
 	default:
 		return fmt.Sprintf("Error: unknown command: %v", cmd)
 	}
@@ -916,6 +1127,8 @@ func handleCommand(cmd, args string) string {
 
 func getCmdTimeout(cmd string) time.Duration {
 	switch cmd {
+	case "debug_pprof":
+		return 30 * time.Second
 	case sendFilesToPeerCmd:
 		return 24 * time.Hour
 	case sendPeerMessageCmd:
@@ -972,7 +1185,7 @@ func notificationMarks() int {
 type notificationCallback struct{}
 
 func (n *notificationCallback) OnNotify(data []byte) error {
-	return ipnNotify("watchNotifications", string(data))
+	return ipnNotifyBytes("watchNotifications", data)
 }
 
 // VPNBuilder collects network settings before applying them all at once
@@ -1146,7 +1359,7 @@ func (s *ipnService) NewBuilder() libtailscale.VPNServiceBuilder {
 
 func (s *ipnService) Close() {
 	// Set network setting to nil
-	clogf("[peerMessage] ipnService.Close id=%s cachedNetworkSettingsNil=%v savedTunFd=%d", s.ID(), cachedNetworkSettings == nil, savedTunFd)
+	clogf("ipnService.Close id=%s cachedNetworkSettingsNil=%v savedTunFd=%d", s.ID(), cachedNetworkSettings == nil, savedTunFd)
 	clogf("Closing VPN service. Clearing network settings.")
 	if err := setNetworkSettings(NetworkSettings{}); err != nil {
 		clogf("Failed to clear network settings: %v", err)
@@ -1156,20 +1369,20 @@ func (s *ipnService) Close() {
 func (s *ipnService) DisconnectVPN() {
 	// not-implemented yet.
 	// Send packet tunnel update?
-	clogf("[peerMessage] ipnService.DisconnectVPN id=%s cachedNetworkSettingsNil=%v savedTunFd=%d", s.ID(), cachedNetworkSettings == nil, savedTunFd)
+	clogf("ipnService.DisconnectVPN id=%s cachedNetworkSettingsNil=%v savedTunFd=%d", s.ID(), cachedNetworkSettings == nil, savedTunFd)
 }
 
 func (s *ipnService) UpdateVpnStatus(bool) {
 	// Send packet tunnel update?
-	clogf("[peerMessage] ipnService.UpdateVpnStatus id=%s", s.ID())
+	clogf("ipnService.UpdateVpnStatus id=%s", s.ID())
 }
 
 func requestVPN(fd int32) {
-	clogf("[peerMessage] requestVPN enter fd=%d oldServiceNil=%v savedTunFd=%d", fd, service == nil, savedTunFd)
+	clogf("requestVPN enter fd=%d oldServiceNil=%v savedTunFd=%d", fd, service == nil, savedTunFd)
 	service = newIPNService(fd)
-	clogf("[peerMessage] requestVPN posting service id=%s fd=%d", service.ID(), fd)
+	clogf("requestVPN posting service id=%s fd=%d", service.ID(), fd)
 	libtailscale.RequestVPN(service)
-	clogf("[peerMessage] requestVPN posted service id=%s fd=%d", service.ID(), fd)
+	clogf("requestVPN posted service id=%s fd=%d", service.ID(), fd)
 }
 
 func turnOffVPN() error {
@@ -1177,7 +1390,7 @@ func turnOffVPN() error {
 	if service != nil {
 		serviceID = service.ID()
 	}
-	clogf("[peerMessage] turnOffVPN enter service=%s cachedNetworkSettingsNil=%v savedTunFd=%d", serviceID, cachedNetworkSettings == nil, savedTunFd)
+	clogf("turnOffVPN enter service=%s cachedNetworkSettingsNil=%v savedTunFd=%d", serviceID, cachedNetworkSettings == nil, savedTunFd)
 	if service == nil {
 		clogf("Turn off VPN skipped: not started before.")
 		return fmt.Errorf("vpn service has not started")
@@ -1187,7 +1400,7 @@ func turnOffVPN() error {
 		return nil
 	}
 	clogf("Turn off VPN: skip clearing network settings.")
-	clogf("[peerMessage] turnOffVPN leaving LocalBackend service connected; ServiceDisconnect is currently disabled service=%s", serviceID)
+	clogf("turnOffVPN leaving LocalBackend service connected; ServiceDisconnect is currently disabled service=%s", serviceID)
 	//log.Printf("Disconnecting VPN service: %v", service.ID())
 	//libtailscale.ServiceDisconnect(service)
 	return nil

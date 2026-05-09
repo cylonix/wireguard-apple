@@ -255,18 +255,18 @@ public class WireGuardAdapter {
     /// - Parameter completionHandler: completion handler.
     public func stop(completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
         workQueue.async {
-            wg_log(.info, message: "[peerMessage] WireGuardAdapter.stop begin state=\(self.state.lifecycleLogDescription)")
+            wg_log(.info, message: "WireGuardAdapter.stop begin state=\(self.state.lifecycleLogDescription)")
             switch self.state {
             case .started(let handle, _):
-                wg_log(.info, message: "[peerMessage] WireGuardAdapter.stop calling wgTurnOff handle=\(handle)")
+                wg_log(.info, message: "WireGuardAdapter.stop calling wgTurnOff handle=\(handle)")
                 wgTurnOff(handle)
 
             case .temporaryShutdown:
-                wg_log(.info, staticMessage: "[peerMessage] WireGuardAdapter.stop temporaryShutdown; wgTurnOff already called by path monitor")
+                wg_log(.info, staticMessage: "WireGuardAdapter.stop temporaryShutdown; wgTurnOff already called by path monitor")
                 break
 
             case .stopped:
-                wg_log(.info, staticMessage: "[peerMessage] WireGuardAdapter.stop ignored; already stopped")
+                wg_log(.info, staticMessage: "WireGuardAdapter.stop ignored; already stopped")
                 completionHandler(.invalidState)
                 return
             }
@@ -276,7 +276,7 @@ public class WireGuardAdapter {
 
             self.state = .stopped
 
-            wg_log(.info, staticMessage: "[peerMessage] WireGuardAdapter.stop completed")
+            wg_log(.info, staticMessage: "WireGuardAdapter.stop completed")
             completionHandler(nil)
         }
     }
@@ -535,7 +535,7 @@ public class WireGuardAdapter {
                 )
             } catch {
                 self.logHandler(.error, "Restart failed: \(error.localizedDescription). Hard resetting")
-                wg_log(.error, message: "[peerMessage] WireGuardAdapter cancelTunnelWithError after restart failure: \(error.localizedDescription)")
+                wg_log(.error, message: "WireGuardAdapter cancelTunnelWithError after restart failure: \(error.localizedDescription)")
                 self.packetTunnelProvider?.cancelTunnelWithError(error)
             }
 
@@ -795,19 +795,26 @@ extension WireGuardAdapter {
             return "ERROR: Failed to create directory '\(containerURL)': \(error.localizedDescription)"
         }
 
-        // Decode envelope (caller + enqueuedAtUs + notification). Fall back to
-        // treating the raw input as the notification body for back-compat.
+        // Decode envelope metadata. Large notification bodies may be stored in
+        // payload files to avoid repeatedly JSON-encoding the full queue.
         var caller = "unknown"
         var enqueuedAtUs: Double = floor(Date().timeIntervalSince1970 * 1_000_000)
         var notification = envelopeJson
+        var payloadFile: String?
+        var payloadBytes: Int?
         if let envData = envelopeJson.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: envData) as? [String: Any],
-           let n = obj["notification"] as? String {
-            notification = n
+           let obj = try? JSONSerialization.jsonObject(with: envData) as? [String: Any] {
             if let c = obj["caller"] as? String { caller = c }
             if let ts = obj["enqueuedAtUs"] as? Double { enqueuedAtUs = ts }
             else if let ts = obj["enqueuedAtUs"] as? Int64 { enqueuedAtUs = Double(ts) }
             else if let ts = obj["enqueuedAtUs"] as? Int { enqueuedAtUs = Double(ts) }
+            if let n = obj["notification"] as? String { notification = n }
+            if let p = obj["payloadFile"] as? String {
+                payloadFile = p
+                notification = ""
+            }
+            if let b = obj["payloadBytes"] as? Int { payloadBytes = b }
+            else if let b = obj["payloadBytes"] as? Double { payloadBytes = Int(b) }
         }
 
         // Use file coordination for atomic access
@@ -823,18 +830,32 @@ extension WireGuardAdapter {
                 queue = (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
             }
 
-            // Add new notification
-            let entry: [String: Any] = [
+            // Add new notification. Keep the queue metadata-only when the
+            // payload is in a sidecar file.
+            var entry: [String: Any] = [
                 "id": UUID().uuidString,
                 "timestamp": enqueuedAtUs, // microseconds since epoch
                 "caller": caller,
-                "notification": notification,
             ]
+            if let payloadFile = payloadFile {
+                entry["payloadFile"] = payloadFile
+                entry["payloadBytes"] = payloadBytes ?? 0
+            } else {
+                entry["notification"] = notification
+            }
             queue.append(entry)
 
             // Keep last 100 items
             if queue.count > 100 {
-                queue.removeFirst(queue.count - 100)
+                let dropCount = queue.count - 100
+                let dropped = queue.prefix(dropCount)
+                queue.removeFirst(dropCount)
+                let payloadDir = url.appendingPathComponent("ipn_notification_payloads")
+                for item in dropped {
+                    if let payloadFile = item["payloadFile"] as? String {
+                        try? fileManager.removeItem(at: payloadDir.appendingPathComponent(payloadFile))
+                    }
+                }
             }
 
             // Write atomically
