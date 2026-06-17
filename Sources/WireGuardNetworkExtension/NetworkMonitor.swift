@@ -70,48 +70,42 @@ class NetworkMonitor {
     private func pickDefaultNetwork() -> (NWInterface, LinkProperties)? {
         let path = monitor.currentPath
 
-        // First, find all interfaces capable of internet connectivity
-        let internetCapableInterfaces = activeInterfaces.filter { pair in
-            let interface = pair.key
-            log(.debug, message: "Checking interface: \(interface.name) of type \(interface.type) with \(path.usesInterfaceType(interface.type)) status \(path.status)")
-            return path.usesInterfaceType(interface.type) &&
-                path.status == .satisfied &&
-                !interface.type.isVPN
-        }
-
-        if internetCapableInterfaces.isEmpty {
-            log(.debug, message: "No internet capable interfaces found")
+        guard path.status == .satisfied else {
+            log(.debug, message: "pickDefaultNetwork: path status is \(path.status); no default network")
             return nil
         }
 
-        log(.debug, message: "Found \(internetCapableInterfaces.count) internet capable interfaces")
-
-        // Among internet capable interfaces, prefer non-metered with DNS servers
-        let nonMetered = internetCapableInterfaces.first { pair in
-            let properties = pair.value
-            return !properties.isMetered && !properties.dnsServers.isEmpty
+        // Walk the interfaces in the OS's own order of preference.
+        //
+        // NWPath.availableInterfaces is ordered by the system's route
+        // preference, so the first usable, path-using, non-VPN interface is the
+        // one the OS is actually routing through right now. We must follow that
+        // ordering rather than preferring non-metered Wi-Fi out of an unordered
+        // dictionary: when iOS promotes cellular to the primary path (e.g. Wi-Fi
+        // goes weak and the device moves to 5G) while Wi-Fi lingers as merely
+        // "available", the old logic kept nominating the stale Wi-Fi interface.
+        //
+        // The interface chosen here is what we feed to netmon via
+        // UpdateLastKnownDefaultRouteInterface (through the DNS-config handler),
+        // which in turn decides OSDefaultRoute() and whether a link change is
+        // classified major. Nominating the wrong interface pins the whole
+        // backend (socket binding, DERP, magicDNS) to a dead link.
+        for interface in path.availableInterfaces {
+            if interface.type.isVPN || isVPNInterface(interface) {
+                continue
+            }
+            guard path.usesInterfaceType(interface.type) else {
+                log(.debug, message: "Skipping interface \(interface.name): path does not use type \(interface.type)")
+                continue
+            }
+            guard let properties = getLinkProperties(for: interface) else {
+                continue
+            }
+            log(.debug, message: "Picked default interface in OS order: \(interface.name) type=\(interface.type) metered=\(properties.isMetered) hasDNS=\(!properties.dnsServers.isEmpty)")
+            return (interface, properties)
         }
 
-        if let nonMetered = nonMetered {
-            log(.debug, message: "Picked non-metered internet interface: \(nonMetered.key.name)")
-            return nonMetered
-        }
-
-        // Then try any internet capable interface with DNS servers
-        let withDNS = internetCapableInterfaces.first { !$0.value.dnsServers.isEmpty }
-        if let withDNS = withDNS {
-            log(.debug, message: "Picked internet interface with DNS: \(withDNS.key.name)")
-            return withDNS
-        }
-
-        // As last resort, pick any internet capable interface
-        let anyInterface = internetCapableInterfaces.first
-        if let anyInterface = anyInterface {
-            log(.debug, message: "Picked internet interface without DNS: \(anyInterface.key.name)")
-            return anyInterface
-        }
-
-        log(.error, message: "No suitable network interfaces found")
+        log(.error, message: "No suitable network interfaces found in path order")
         return nil
     }
 
