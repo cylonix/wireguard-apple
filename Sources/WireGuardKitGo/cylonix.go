@@ -31,6 +31,7 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/types/logger"
+	"tailscale.com/util/syspolicy/setting"
 	"tailscale.com/version"
 )
 
@@ -744,12 +745,21 @@ func (c *CylonixAppCtx) GetPlatformDNSConfig() string {
 	return ""
 }
 
+// Cylonix does not implement any MDM/system-policy source on Apple, so every
+// policy key is unconfigured. We must report this as setting.ErrNotConfigured
+// rather than ("", nil): a nil error makes the effective-policy layer treat the
+// key as *configured with an empty value*. That breaks any presence check —
+// notably syspolicy.HasAnyOf(ExitNodeID, ExitNodeIP) in checkEditPrefsAccess,
+// which then reports exit node usage as "managed by policy" and blocks the user
+// from selecting an exit node (errManagedByPolicy) on every (unmanaged) device.
+// It also silently clobbered string policies like ControlURL/Hostname to empty,
+// which previously had to be worked around at each call site.
 func (c *CylonixAppCtx) GetSyspolicyStringValue(string) (string, error) {
-	return "", nil
+	return "", setting.ErrNotConfigured
 }
 
 func (c *CylonixAppCtx) GetSyspolicyBooleanValue(key string) (bool, error) {
-	return false, nil
+	return false, setting.ErrNotConfigured
 }
 
 func (c *CylonixAppCtx) GetSyspolicyStringArrayJSONValue(key string) (string, error) {
