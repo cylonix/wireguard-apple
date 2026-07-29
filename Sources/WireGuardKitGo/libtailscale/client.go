@@ -24,6 +24,7 @@ const (
 	endpointDNSQuery          = "dns-query"
 	endpointEnvKnob           = "envknob"
 	endpointL2RelayCapture    = "l2relay-capture"
+	endpointSetAppInfo        = "set-app-info"
 	endpointPrefs             = "prefs"
 	endpointFileTargets       = "file-targets"
 	endpointUploadMetrics     = "upload-client-metrics"
@@ -56,6 +57,12 @@ func NewClient(app Application) *Client {
 
 func (c *Client) AddDelNodeCapability(cap, op string) error {
 	return c.post(endpointCap+"?cap="+url.QueryEscape(cap)+"&op="+url.QueryEscape(op), 5000, nil, nil)
+}
+
+// SetAppInfo reports the GUI app's version/build description (e.g.
+// "cylonix-app/1.2.3+45") so the daemon records it in Hostinfo.App.
+func (c *Client) SetAppInfo(app string) error {
+	return c.post(endpointSetAppInfo+"?app="+url.QueryEscape(app), 5000, nil, nil)
 }
 
 func (c *Client) SetEnvKnob(setting string) error {

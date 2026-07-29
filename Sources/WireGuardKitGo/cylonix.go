@@ -1110,6 +1110,14 @@ func handleCommand(cmd, args string) string {
 			return "Error: " + err.Error()
 		}
 		return "Success"
+	case "set_app_info":
+		if args == "" {
+			return "Error: no arguments provided"
+		}
+		if err := client.SetAppInfo(args); err != nil {
+			return "Error: " + err.Error()
+		}
+		return "Success"
 	case "debug_state_traces":
 		// Return the in-memory ring buffer of recent IPN state-send events,
 		// each annotated with a goroutine stack trace captured at send time.
