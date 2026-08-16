@@ -439,8 +439,15 @@ func startInit() {
 		log.Println("main(): not setting GC percent")
 	}
 
-	log.Println("main(): set memory limit to 40MB")
-	debug.SetMemoryLimit(40 * 1024 * 1024)
+	// iOS kills network extensions at ~50MB resident (jetsam
+	// per-process-limit; observed as rpages=3200 on iOS 26). The Go heap
+	// is only part of the footprint: the binary's dirty data/bss, stacks,
+	// and non-heap runtime memory measured ~20MB on a fresh extension, so
+	// a 40MB Go soft limit allowed the total to cross the cap during
+	// netmap/notify bursts (jetsam-killed the NE on 2026-08-15). Budget
+	// the Go heap at cap minus the non-Go baseline with safety margin.
+	log.Println("main(): set memory limit to 32MB")
+	debug.SetMemoryLimit(32 * 1024 * 1024)
 
 	// Refer to https://tailscale.com/blog/go-linker/
 	// Although we are getting 50MB in ios 15.1, it is worth to make versions
@@ -448,6 +455,7 @@ func startInit() {
 	// Set max proc to 1.
 	runtime.GOMAXPROCS(1)
 	startPprofService()
+	startMemoryWatchdog()
 }
 
 func main() {
