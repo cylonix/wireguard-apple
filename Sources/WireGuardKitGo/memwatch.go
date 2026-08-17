@@ -8,48 +8,49 @@ import (
 	"time"
 )
 
-// The iOS network extension is jetsam-killed at ~50MB resident
-// (per-process-limit). The watchdog samples Go memory and, when it
-// crosses memWatchThreshold, logs the state and writes a heap profile to
-// the shared debug_profiles directory so post-mortems of memory spikes
-// have allocation-site evidence even when jetsam wins the race. The dump
-// path runs runtime.GC() first, which also sheds droppable memory at the
-// moment of danger.
+// The iOS network extension runs under a tight resident-memory limit
+// (~50MB, jetsam per-process-limit). The watchdog samples Go memory and
+// warns when it crosses memWatchThreshold. It deliberately does NO disk
+// I/O: an earlier version wrote heap profiles to disk on every excursion,
+// which added write pressure to an extension that has hit iOS disk-write
+// resource limits before. It only logs, and only on a state change
+// (crossing the threshold), with a once-per-hour reminder while the
+// condition persists, so a sustained high-memory state cannot flood the
+// log.
 const (
 	memWatchInterval  = 5 * time.Second
 	memWatchThreshold = 34 << 20 // Go-owned bytes; GOMEMLIMIT is 32MiB
-	memWatchDumpGap   = 10 * time.Minute
+	memWatchRepeat    = time.Hour
 )
 
 func startMemoryWatchdog() {
 	go func() {
-		var lastDump time.Time
 		var above bool
+		var lastWarn time.Time
 		for range time.Tick(memWatchInterval) {
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
 			goMem := m.HeapInuse + m.StackInuse + m.MSpanInuse +
 				m.MCacheInuse + m.GCSys + m.OtherSys
+
 			if goMem < memWatchThreshold {
+				if above {
+					clogf("memwatch: go memory recovered: total=%dK", goMem>>10)
+				}
 				above = false
 				continue
 			}
-			if !above {
-				// Log once per excursion above the threshold.
-				clogf("memwatch: go memory high: total=%dK heapInuse=%dK heapSys=%dK stacks=%dK numGC=%d goroutines=%d",
-					goMem>>10, m.HeapInuse>>10, m.HeapSys>>10,
-					m.StackInuse>>10, m.NumGC, runtime.NumGoroutine())
-			}
-			above = true
-			if time.Since(lastDump) < memWatchDumpGap {
+
+			// At or above the threshold. Warn on the initial crossing, then
+			// at most once per hour while it stays high.
+			if above && time.Since(lastWarn) < memWatchRepeat {
 				continue
 			}
-			lastDump = time.Now()
-			if summary, err := dumpDebugPprof("heap"); err != nil {
-				clogf("memwatch: heap profile failed: %v", err)
-			} else {
-				clogf("memwatch: wrote heap profile: %s", summary)
-			}
+			lastWarn = time.Now()
+			above = true
+			clogf("memwatch: go memory high: total=%dK heapInuse=%dK heapSys=%dK stacks=%dK numGC=%d goroutines=%d",
+				goMem>>10, m.HeapInuse>>10, m.HeapSys>>10,
+				m.StackInuse>>10, m.NumGC, runtime.NumGoroutine())
 		}
 	}()
 }
