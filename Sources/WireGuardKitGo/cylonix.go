@@ -40,10 +40,11 @@ const (
 
 	tailchatStateKey = ipn.StateKey("_tailchat")
 
-	sendFilesToPeerCmd  = "send_files_to_peer"
-	sendPeerMessageCmd  = "send_peer_message"
-	setActivePeersCmd   = "set_active_peers"
-	clearActivePeersCmd = "clear_active_peers"
+	sendFilesToPeerCmd     = "send_files_to_peer"
+	sendPeerMessageCmd     = "send_peer_message"
+	setActivePeersCmd      = "set_active_peers"
+	clearActivePeersCmd    = "clear_active_peers"
+	markPeerMessageReadCmd = "mark_peer_message_read"
 
 	ipnNotificationPayloadDir = "ipn_notification_payloads"
 	debugProfileDir           = "debug_profiles"
@@ -1059,6 +1060,12 @@ func handleCommand(cmd, args string) string {
 		}
 		if err := client.SetActivePeers(msg.PeerIDs); err != nil {
 			return fmt.Sprintf("Error setting active peers: %v", err)
+		}
+		return "Success"
+	case markPeerMessageReadCmd:
+		// args is the JSON PeerMessageReadReceipt; the daemon validates it.
+		if err := client.MarkPeerMessageRead([]byte(args)); err != nil {
+			return fmt.Sprintf("Error sending read receipt: %v", err)
 		}
 		return "Success"
 	case clearActivePeersCmd:

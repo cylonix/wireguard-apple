@@ -17,34 +17,35 @@ import (
 )
 
 const (
-	endpointCap               = "cap"
-	endpointDebug             = "debug"
-	endpointDebugLog          = "debug-log"
-	endpointBugReport         = "bugreport"
-	endpointDNSQuery          = "dns-query"
-	endpointEnvKnob           = "envknob"
-	endpointL2RelayCapture    = "l2relay-capture"
-	endpointSetAppInfo        = "set-app-info"
-	endpointPrefs             = "prefs"
-	endpointFileTargets       = "file-targets"
-	endpointUploadMetrics     = "upload-client-metrics"
-	endpointStart             = "start"
-	endpointLoginInteractive  = "login-interactive"
-	endpointResetAuth         = "reset-auth"
-	endpointLogout            = "logout"
-	endpointProfiles          = "profiles/"
-	endpointProfilesCurrent   = "profiles/current"
-	endpointStatus            = "status"
-	endpointTKAStatus         = "tka/status"
-	endpointTKASign           = "tka/sign"
-	endpointTKAVerifyDeepLink = "tka/verify-deeplink"
-	endpointPing              = "ping"
-	endpointFiles             = "files/"
-	endpointFilePut           = "file-put/"
-	endpointTailfsServerAddr  = "tailfs/fileserver-address"
-	endpointEnableExitNode    = "set-use-exit-node-enabled"
-	endpointPeerMessageSend   = "peer-message/send"
-	endpointActivePeers       = "peer-message/active-peers"
+	endpointCap                 = "cap"
+	endpointDebug               = "debug"
+	endpointDebugLog            = "debug-log"
+	endpointBugReport           = "bugreport"
+	endpointDNSQuery            = "dns-query"
+	endpointEnvKnob             = "envknob"
+	endpointL2RelayCapture      = "l2relay-capture"
+	endpointSetAppInfo          = "set-app-info"
+	endpointPrefs               = "prefs"
+	endpointFileTargets         = "file-targets"
+	endpointUploadMetrics       = "upload-client-metrics"
+	endpointStart               = "start"
+	endpointLoginInteractive    = "login-interactive"
+	endpointResetAuth           = "reset-auth"
+	endpointLogout              = "logout"
+	endpointProfiles            = "profiles/"
+	endpointProfilesCurrent     = "profiles/current"
+	endpointStatus              = "status"
+	endpointTKAStatus           = "tka/status"
+	endpointTKASign             = "tka/sign"
+	endpointTKAVerifyDeepLink   = "tka/verify-deeplink"
+	endpointPing                = "ping"
+	endpointFiles               = "files/"
+	endpointFilePut             = "file-put/"
+	endpointTailfsServerAddr    = "tailfs/fileserver-address"
+	endpointEnableExitNode      = "set-use-exit-node-enabled"
+	endpointPeerMessageSend     = "peer-message/send"
+	endpointActivePeers         = "peer-message/active-peers"
+	endpointPeerMessageMarkRead = "peer-message/mark-read"
 )
 
 type Client struct {
@@ -108,6 +109,12 @@ func (c *Client) SetActivePeers(peerIDs []string) error {
 // ClearActivePeers releases the active-peer set immediately.
 func (c *Client) ClearActivePeers() error {
 	return c.delete(endpointActivePeers, nil, nil)
+}
+
+// MarkPeerMessageRead asks the daemon to send a read receipt to a peer. The
+// daemon answers immediately and delivers in the background.
+func (c *Client) MarkPeerMessageRead(payload []byte) error {
+	return c.post(endpointPeerMessageMarkRead, 5000, payload, nil)
 }
 
 func (c *Client) StartLoginInteractive() error {
