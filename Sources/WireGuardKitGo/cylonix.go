@@ -223,6 +223,12 @@ type debugPprofResult struct {
 	NextGC       uint64 `json:"nextGC"`
 	NumGC        uint32 `json:"numGC"`
 	NumGoroutine int    `json:"numGoroutine"`
+	// MemClasses is the runtime/metrics breakdown at dump time (see memwatch.go).
+	MemClasses string `json:"memClasses,omitempty"`
+	// Footprint and FootprintPeak are the resident footprint iOS charges
+	// against the extension's limit, now and at its lifetime peak.
+	Footprint     uint64 `json:"footprint,omitempty"`
+	FootprintPeak uint64 `json:"footprintPeak,omitempty"`
 }
 
 func dumpDebugPprof(args string) (string, error) {
@@ -295,6 +301,10 @@ func dumpDebugPprof(args string) (string, error) {
 		NextGC:       ms.NextGC,
 		NumGC:        ms.NumGC,
 		NumGoroutine: runtime.NumGoroutine(),
+		MemClasses:   memClasses(),
+	}
+	if cur, peak, ok := taskFootprint(); ok {
+		result.Footprint, result.FootprintPeak = cur, peak
 	}
 	out, err := json.Marshal(result)
 	if err != nil {

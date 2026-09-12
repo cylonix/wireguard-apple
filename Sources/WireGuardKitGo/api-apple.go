@@ -7,6 +7,28 @@ package main
 
 // #include <stdlib.h>
 // #include <sys/types.h>
+// #include <mach/mach.h>
+// #include <mach/task_info.h>
+// // __BEGIN_CYLONIX_ADD__
+// // cylonixTaskFootprint reads the resident footprint iOS charges against
+// // the extension's jetsam limit, plus the kernel's lifetime peak of it.
+// // resident/residentPeak are the task's resident set and its peak: the
+// // basis jetsam snapshots report as rpages, which also counts clean
+// // file-backed pages such as the extension's own code, so it runs
+// // higher than the footprint the limit is enforced against.
+// static int cylonixTaskFootprint(unsigned long long *cur, long long *peak,
+//                                 unsigned long long *resident, unsigned long long *residentPeak) {
+//     task_vm_info_data_t info;
+//     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+//     kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
+//     if (kr != KERN_SUCCESS) return (int)kr;
+//     *cur = info.phys_footprint;
+//     *peak = info.ledger_phys_footprint_peak;
+//     *resident = info.resident_size;
+//     *residentPeak = info.resident_size_peak;
+//     return 0;
+// }
+// // __END_CYLONIX_ADD__
 // static void callLogger(void *func, void *ctx, int level, const char *msg)
 // {
 // 	((void(*)(void *, int, const char *))func)(ctx, level, msg);
@@ -39,6 +61,8 @@ import (
 	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun"
 	"golang.org/x/sys/unix"
+
+	"tailscale.com/util/clientmetric"
 )
 
 var (
@@ -267,6 +291,14 @@ func wgGetConfig(tunnelHandle int32) *C.char {
 	return C.CString(settings)
 }
 
+// __BEGIN_CYLONIX_ADD__
+// metricBumpSockets counts the adapter's socket bumps (each is a magicsock
+// rebind + restun on the Cylonix backend); readable over the tunnel through
+// peer-debug name=footprint.
+var metricBumpSockets = clientmetric.NewCounter("cylonix_bump_sockets")
+
+// __END_CYLONIX_ADD__
+
 //export wgBumpSockets
 func wgBumpSockets(tunnelHandle int32) {
 	// __BEGIN_CYLONIX_ADD__
@@ -274,6 +306,7 @@ func wgBumpSockets(tunnelHandle int32) {
 	// on network path changes. Trigger a magicsock rebind + STUN re-discovery so
 	// the ReceiveIPv4/IPv6 goroutines re-bind to the new interface.
 	if useCylonixBackend {
+		metricBumpSockets.Add(1)
 		log.Printf("Bump socket called. Triggering magicsock rebind + restun.")
 		go bumpCylonixBackendSockets()
 		return
@@ -420,11 +453,40 @@ func startPprofService() {
 	log.Println("Starting a go routine to start pprof...")
 	pprofOnce.Do(func() {
 		go func() {
-			log.Println("Starting pprof service on 0.0.0.0:6060")
-			log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+			// __BEGIN_CYLONIX_MOD__
+			// Loopback only. It used to bind every interface, which exposed
+			// heap and goroutine dumps to anyone on the same Wi-Fi; on-device
+			// callers reach it the same way, and profiles for off-device
+			// analysis come from the debug_pprof command (cylonix.go).
+			log.Println("Starting pprof service on 127.0.0.1:6060")
+			log.Println(http.ListenAndServe("127.0.0.1:6060", nil))
+			// __END_CYLONIX_MOD__
 		}()
 	})
 }
+
+// __BEGIN_CYLONIX_ADD__
+// taskFootprint returns the process's resident footprint as iOS accounts it
+// for the jetsam per-process limit, and the kernel's lifetime peak of it.
+// This is the number that matters for the ~50MB extension limit; Go's own
+// stats only cover what the Go runtime holds.
+func taskFootprint() (cur, peak uint64, ok bool) {
+	cur, peak, _, _, ok = taskMemory()
+	return cur, peak, ok
+}
+
+// taskMemory returns footprint and resident set, each with its lifetime
+// peak. Resident is the basis of the rpages figure in jetsam snapshots.
+func taskMemory() (footprint, footprintPeak, resident, residentPeak uint64, ok bool) {
+	var c, r, rp C.ulonglong
+	var p C.longlong
+	if C.cylonixTaskFootprint(&c, &p, &r, &rp) != 0 {
+		return 0, 0, 0, 0, false
+	}
+	return uint64(c), uint64(p), uint64(r), uint64(rp), true
+}
+
+// __END_CYLONIX_ADD__
 
 func startInit() {
 	log.Printf("main(): starting the network extension go routine")

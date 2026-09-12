@@ -10,7 +10,17 @@ class NetworkMonitor {
     private let monitor: NWPathMonitor
     private let monitorQueue = DispatchQueue(label: "io.cylonix.network-monitor")
     private var activeInterfaces: [NWInterface: LinkProperties] = [:]
- 
+
+    // NWPathMonitor fires on every path attribute flicker: on a phone with
+    // both radios up that was ~3,000 updates a day with the picked interface
+    // changing once. Each one used to be forwarded to Go as a network change,
+    // and each of those tore down and re-dialed the DERP tunnel. Forward an
+    // update only when what the tunnel is bound to actually moved: the picked
+    // interface, its addresses (a renumbering on the same interface kills the
+    // socket too), or its DNS. Real handoffs still go through immediately.
+    private var lastForwardedKey: String?
+    private var skippedSinceForward = 0
+
     struct LinkProperties {
         var dnsServers: [String]
         var searchDomains: [String]
@@ -112,6 +122,9 @@ class NetworkMonitor {
     private func maybeUpdateDNSConfig(reason: String, dnsConfigHandler: (String, String) -> Void) {
         guard let (_, properties) = pickDefaultNetwork() else {
             log(.error, message: "\(reason): no default network available")
+            // The next usable path must be forwarded even if it looks like
+            // the last one: the tunnel has to be re-dialed after an outage.
+            lastForwardedKey = nil
             return
         }
 
@@ -119,6 +132,18 @@ class NetworkMonitor {
         if !properties.searchDomains.isEmpty {
             config += "\n" + properties.searchDomains.joined(separator: " ")
         }
+
+        let addresses = interfaceAddresses(named: properties.interfaceName).joined(separator: ",")
+        let key = "\(properties.interfaceName)|\(config)|\(addresses)"
+        if key == lastForwardedKey {
+            skippedSinceForward += 1
+            if skippedSinceForward == 1 || skippedSinceForward % 100 == 0 {
+                log(.debug, message: "\(reason): no change on \(properties.interfaceName) (skipped \(skippedSinceForward) updates)")
+            }
+            return
+        }
+        lastForwardedKey = key
+        skippedSinceForward = 0
 
         log(.debug, message: "\(reason): updating DNS config for interface \(properties.interfaceName) with servers: \(config)")
         dnsConfigHandler(config, properties.interfaceName)
@@ -198,6 +223,27 @@ class NetworkMonitor {
     private func isMetered(interface: NWInterface) -> Bool {
         // On iOS, cellular interfaces are considered metered
         return interface.type == .cellular
+    }
+
+    /// Addresses currently assigned to the named interface, sorted, so that a
+    /// renumbering on the same interface counts as a change.
+    private func interfaceAddresses(named name: String) -> [String] {
+        var result: [String] = []
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return result }
+        defer { freeifaddrs(list) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            cursor = entry.pointee.ifa_next
+            guard let addr = entry.pointee.ifa_addr, String(cString: entry.pointee.ifa_name) == name else { continue }
+            let family = Int32(addr.pointee.sa_family)
+            guard family == AF_INET || family == AF_INET6 else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                result.append(String(cString: host))
+            }
+        }
+        return result.sorted()
     }
 
     private func isVPNInterface(_ interface: NWInterface) -> Bool {

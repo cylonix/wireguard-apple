@@ -70,6 +70,24 @@ public class WireGuardAdapter {
     /// Network routes monitor.
     private var networkMonitor: NWPathMonitor?
 
+    // __BEGIN_CYLONIX_ADD__
+    // NWPathMonitor reports every path attribute flicker (~3,000 a day on a
+    // phone with both radios up). Every report used to bump the sockets, and
+    // for the Cylonix backend a bump is a full magicsock rebind plus a STUN
+    // re-discovery (and, before the underlay-aware rebind, a DERP re-dial).
+    // Bump when the physical path actually changed — the ordered set of
+    // usable non-tunnel interfaces or their addresses — and otherwise at most
+    // once per `bumpRefreshInterval`, as a safety net for socket staleness
+    // that iOS does not report as a path change.
+    private var lastBumpFingerprint: String?
+    private var lastBumpTime: Date?
+    private var bumpsSkipped = 0
+    private let bumpRefreshInterval: TimeInterval = 5 * 60
+    /// Fires the periodic refresh even when NWPathMonitor goes quiet, so the
+    /// safety net does not depend on path updates arriving.
+    private var bumpRefreshTimer: DispatchSourceTimer?
+    // __END_CYLONIX_ADD__
+
     /// Packet tunnel provider.
     private weak var packetTunnelProvider: NEPacketTunnelProvider?
 
@@ -177,7 +195,7 @@ public class WireGuardAdapter {
         wgSetLogger(nil, nil)
 
         // Cancel network monitor
-        networkMonitor?.cancel()
+        networkMonitor?.cancel(); stopBumpRefreshTimer() // __CYLONIX_MOD__
 
         // Shutdown the tunnel
         if case .started(let handle, _) = self.state {
@@ -222,6 +240,7 @@ public class WireGuardAdapter {
                 self?.didReceivePathUpdate(path: path)
             }
             networkMonitor.start(queue: self.workQueue)
+            self.startBumpRefreshTimer() // __CYLONIX_ADD__
 
             do {
                 let settingsGenerator = try self.makeSettingsGenerator(with: tunnelConfiguration)
@@ -271,7 +290,7 @@ public class WireGuardAdapter {
                 return
             }
 
-            self.networkMonitor?.cancel()
+            self.networkMonitor?.cancel(); self.stopBumpRefreshTimer() // __CYLONIX_MOD__
             self.networkMonitor = nil
 
             self.state = .stopped
@@ -483,21 +502,31 @@ public class WireGuardAdapter {
 
         #if os(macOS)
         if case .started(let handle, _) = self.state {
+            // __BEGIN_CYLONIX_MOD__
+            guard let reason = self.bumpReason(for: path) else { return }
+            self.logHandler(.verbose, "Bumping the sockets: \(reason)")
+            // __END_CYLONIX_MOD__
             wgBumpSockets(handle)
         }
         #elseif os(iOS)
         switch self.state {
         case .started(let handle, let settingsGenerator):
             if path.status.isSatisfiable {
+                // __BEGIN_CYLONIX_MOD__
+                guard let reason = self.bumpReason(for: path) else { return }
+                // __END_CYLONIX_MOD__
                 let (wgConfig, resolutionResults) = settingsGenerator.endpointUapiConfiguration()
                 self.logEndpointResolutionResults(resolutionResults)
 
-                self.logHandler(.verbose, "Connectivity is good, set config and bump the sockets")
+                self.logHandler(.verbose, "Connectivity is good (\(reason)), set config and bump the sockets") // __CYLONIX_MOD__
                 wgSetConfig(handle, wgConfig)
                 wgDisableSomeRoamingForBrokenMobileSemantics(handle)
                 wgBumpSockets(handle)
             } else {
                 self.logHandler(.verbose, "Connectivity offline, pausing backend.")
+                // The path that brings us back must bump even if it looks
+                // like the one we went offline on.
+                self.lastBumpFingerprint = nil // __CYLONIX_ADD__
 
                 self.state = .temporaryShutdown(settingsGenerator)
                 wgTurnOff(handle)
@@ -554,6 +583,89 @@ public enum WireGuardLogLevel: Int32 {
     case verbose = 0
     case error = 1
 }
+
+// __BEGIN_CYLONIX_ADD__
+extension WireGuardAdapter {
+    /// Bumps the sockets on a timer whenever the last bump is older than
+    /// `bumpRefreshInterval`, independent of path updates.
+    fileprivate func startBumpRefreshTimer() {
+        stopBumpRefreshTimer()
+        let timer = DispatchSource.makeTimerSource(queue: workQueue)
+        timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))
+        timer.setEventHandler { [weak self] in
+            guard let self = self, case .started(let handle, _) = self.state else { return }
+            if let last = self.lastBumpTime, Date().timeIntervalSince(last) < self.bumpRefreshInterval { return }
+            self.lastBumpTime = Date()
+            self.logHandler(.verbose, "Bumping the sockets: periodic refresh (timer, skipped \(self.bumpsSkipped) identical updates)")
+            self.bumpsSkipped = 0
+            wgBumpSockets(handle)
+        }
+        timer.resume()
+        bumpRefreshTimer = timer
+    }
+
+    fileprivate func stopBumpRefreshTimer() {
+        bumpRefreshTimer?.cancel()
+        bumpRefreshTimer = nil
+    }
+
+    /// Decides whether a path update warrants bumping the sockets. Returns the
+    /// reason to log, or nil when the physical path is unchanged and the last
+    /// bump is recent.
+    fileprivate func bumpReason(for path: Network.NWPath) -> String? {
+        let fingerprint = Self.pathFingerprint(path)
+        let now = Date()
+        if fingerprint != lastBumpFingerprint {
+            let reason = lastBumpFingerprint == nil ? "first path" : "path changed (skipped \(bumpsSkipped) identical updates)"
+            lastBumpFingerprint = fingerprint
+            lastBumpTime = now
+            bumpsSkipped = 0
+            return reason
+        }
+        if let last = lastBumpTime, now.timeIntervalSince(last) >= bumpRefreshInterval {
+            lastBumpTime = now
+            let reason = "periodic refresh (skipped \(bumpsSkipped) identical updates)"
+            bumpsSkipped = 0
+            return reason
+        }
+        bumpsSkipped += 1
+        if bumpsSkipped == 1 || bumpsSkipped % 100 == 0 {
+            logHandler(.verbose, "Path update with no physical change; not bumping (skipped \(bumpsSkipped))")
+        }
+        return nil
+    }
+
+    /// The physical path as the sockets see it: the status, then each usable
+    /// non-tunnel interface in the OS's preference order with its addresses,
+    /// so a renumbering on the same interface counts as a change.
+    private static func pathFingerprint(_ path: Network.NWPath) -> String {
+        var parts = ["\(path.status)"]
+        for interface in path.availableInterfaces where interface.type != .other && path.usesInterfaceType(interface.type) {
+            parts.append("\(interface.name):\(interface.type):\(interfaceAddresses(named: interface.name).joined(separator: ","))")
+        }
+        return parts.joined(separator: "|")
+    }
+
+    private static func interfaceAddresses(named name: String) -> [String] {
+        var result: [String] = []
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return result }
+        defer { freeifaddrs(list) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            cursor = entry.pointee.ifa_next
+            guard let addr = entry.pointee.ifa_addr, String(cString: entry.pointee.ifa_name) == name else { continue }
+            let family = Int32(addr.pointee.sa_family)
+            guard family == AF_INET || family == AF_INET6 else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                result.append(String(cString: host))
+            }
+        }
+        return result.sorted()
+    }
+}
+// __END_CYLONIX_ADD__
 
 private extension Network.NWPath.Status {
     /// Returns `true` if the path is potentially satisfiable.

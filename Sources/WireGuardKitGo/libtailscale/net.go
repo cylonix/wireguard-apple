@@ -11,13 +11,17 @@ import (
 	"net/netip"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"inet.af/netaddr"
 	"tailscale.com/net/dns"
 	"tailscale.com/net/netmon"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/wgengine/router"
+
+	"tailscale.com/util/clientmetric"
 )
 
 // errVPNNotPrepared is used when VPNService.Builder.establish returns
@@ -40,8 +44,58 @@ type VpnService struct {
 
 var vpnService = &VpnService{}
 
-// Report interfaces in the device in net.Interface format.
+// __BEGIN_CYLONIX_ADD__
+// ifaceCache holds the last interface table for ifaceCacheTTL. On this
+// platform every netmon enumeration crosses into Swift and re-parses the
+// whole table, and the engine asks for it on hot paths: the default-route
+// lookup that binds each new socket, netcheck, and magicsock endpoint
+// updates. A 10-minute allocation profile of the extension put 42% of all
+// bytes allocated under this function, which with GOGC=10 is most of the
+// garbage-collector churn. NetworkChanged clears the cache, so a reported
+// path change is never served stale; the TTL bounds staleness for changes
+// the path monitor misses.
+const ifaceCacheTTL = 5 * time.Second
+
+var ifaceCache struct {
+	mu     sync.Mutex
+	at     time.Time
+	ifaces []netmon.Interface
+}
+
+func invalidateInterfaceCache() {
+	ifaceCache.mu.Lock()
+	ifaceCache.at = time.Time{}
+	ifaceCache.ifaces = nil
+	ifaceCache.mu.Unlock()
+}
+
+// Report interfaces in the device in net.Interface format, from the cache
+// when it is fresh. Callers get their own slice; the entries are shared and
+// treated as read-only by netmon.
 func (a *App) getInterfaces() ([]netmon.Interface, error) {
+	ifaceCache.mu.Lock()
+	if !ifaceCache.at.IsZero() && time.Since(ifaceCache.at) < ifaceCacheTTL {
+		ifaces := append([]netmon.Interface(nil), ifaceCache.ifaces...)
+		ifaceCache.mu.Unlock()
+		return ifaces, nil
+	}
+	ifaceCache.mu.Unlock()
+
+	ifaces, err := a.getInterfacesUncached()
+	if err != nil {
+		return ifaces, err
+	}
+	ifaceCache.mu.Lock()
+	ifaceCache.at = time.Now()
+	ifaceCache.ifaces = append([]netmon.Interface(nil), ifaces...)
+	ifaceCache.mu.Unlock()
+	return ifaces, nil
+}
+
+// __END_CYLONIX_ADD__
+
+// Report interfaces in the device in net.Interface format.
+func (a *App) getInterfacesUncached() ([]netmon.Interface, error) { // __CYLONIX_MOD__ was getInterfaces
 	var ifaces []netmon.Interface
 
 	ifaceString, err := a.appCtx.GetInterfacesAsString()
@@ -271,7 +325,13 @@ func (b *backend) CloseTUNs() {
 }
 
 // ifname is the interface name retrieved from LinkProperties on network change. If a network is lost, an empty string is passed in.
+// metricNetworkChanged counts path updates the Swift NetworkMonitor forwarded
+// (after its no-op dedupe); readable over the tunnel via peer-debug
+// name=footprint next to cylonix_bump_sockets.
+var metricNetworkChanged = clientmetric.NewCounter("cylonix_network_changed")
+
 func (b *backend) NetworkChanged(ifname string) {
+	metricNetworkChanged.Add(1)
 	defer func() {
 		if p := recover(); p != nil {
 			log.Printf("panic in NetworkChanged %s: %s", p, debug.Stack())
@@ -280,6 +340,7 @@ func (b *backend) NetworkChanged(ifname string) {
 	}()
 
 	// Set the interface name and alert the monitor.
+	invalidateInterfaceCache() // __CYLONIX_ADD__ the monitor re-reads interfaces next
 	netmon.UpdateLastKnownDefaultRouteInterface(ifname)
 	if b.sys != nil {
 		if nm, ok := b.sys.NetMon.GetOK(); ok {
