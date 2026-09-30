@@ -564,7 +564,11 @@ func handleFilesWaiting(dir string, files []apitype.WaitingFile) {
 // second code path.
 func handleDirectReceivedFile(baseName, finalPath, transferID string) {
 	dir := filepath.Dir(finalPath)
-	wf := apitype.WaitingFile{Name: baseName}
+	// Report the name the file was finalized under. fsFileOps.Rename
+	// appends " (1)" etc. when baseName already exists in the directory,
+	// so baseName may not be the file on disk; the Swift side looks the
+	// file up by this name.
+	wf := apitype.WaitingFile{Name: filepath.Base(finalPath)}
 	if fi, err := os.Stat(finalPath); err == nil {
 		wf.Size = fi.Size()
 	}
@@ -579,7 +583,7 @@ func handleDirectReceivedFile(baseName, finalPath, transferID string) {
 		clogf("handleDirectReceivedFile: marshal failed: %v", err)
 		return
 	}
-	clogf("handleDirectReceivedFile: name=%q transferID=%q dir=%q", baseName, transferID, dir)
+	clogf("handleDirectReceivedFile: name=%q final=%q transferID=%q dir=%q", baseName, wf.Name, transferID, dir)
 	filesWaiting(string(v))
 }
 

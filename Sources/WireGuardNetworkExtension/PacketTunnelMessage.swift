@@ -37,3 +37,18 @@ enum PacketTunnelUserDefaultsKey {
     static let backendLivenessProbeError = "BackendLivenessProbeError"
     static let backendLivenessProbeProviderStopping = "BackendLivenessProbeProviderStopping"
 }
+
+/// The shared folder the iOS File Provider extension exposes as a "Cylonix"
+/// location in Files. The network extension moves plain File Drop receipts
+/// there at arrival; the app creates the folder at launch. Keep in sync with
+/// FileProviderStore in ios/fileProvider.
+enum SharedDownloads {
+    /// Fixed by the File Provider framework: NSFileProviderManager
+    /// .documentStorageURL is "<app group>/File Provider Storage".
+    static let folderName = "File Provider Storage"
+    /// Earlier builds delivered here and used a replicated domain; the app
+    /// migrates the folder and removes the domain at launch.
+    static let legacyFolderName = "Downloads"
+    static let legacyDomainIdentifier = "downloads"
+    static let domainDisplayName = "Cylonix"
+}

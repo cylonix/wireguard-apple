@@ -5,6 +5,11 @@ import Foundation
 import Network
 import NetworkExtension
 import UserNotifications
+#if os(iOS)
+import FileProvider
+import Photos
+import UniformTypeIdentifiers
+#endif
 #if os(macOS)
 import IOKit
 #endif
@@ -1001,45 +1006,283 @@ extension WireGuardAdapter {
             wg_log(.error, message: "Failed to access shared defaults")
             return "ERROR: Failed to access shared defaults"
         }
-        if let currentFilesWaiting = defaults.string(forKey: PacketTunnelUserDefaultsKey.filesWaiting) {
-            if currentFilesWaiting == filesWaitingDetails {
-                wg_log(.info, message: "Received file details the same as pending for processing. Ignoring.")
-                return ""
-            }
-        }
-        defaults.set(filesWaitingDetails, forKey: PacketTunnelUserDefaultsKey.filesWaiting)
-        defaults.synchronize()
-        // Parse file details and show notification
+        wg_log(.info, message: "Received file details: \(filesWaitingDetails)")
+        var dir = ""
+        var files: [[String: Any]] = []
         do {
-            wg_log(.info, message: "Received file details: \(filesWaitingDetails)")
-            if let json = try JSONSerialization.jsonObject(with: Data(filesWaitingDetails.utf8)) as? [String: Any],
-               let files = json["Files"] as? [[String: Any]]
-            {
-                let fileCount = files.count
-                let previewsEnabled = notificationPreviewEnabled()
-                let title = previewsEnabled ? "Files Received" : "New file received"
-                let body = previewsEnabled
-                    ? (fileCount == 1
-                        ? "You received a new file \((files.first?["Name"] as? String) ?? "*unnamed*")"
-                        : "You received \(fileCount) new files")
-                    : "Open Cylonix to view file details."
-
-                wg_log(.info, message: "Sending User notification of Received \(fileCount) files")
-                sendUserNotification(
-                    title: title,
-                    body: body,
-                    identifier: "file-receipt-\(UUID().uuidString)"
-                )
+            if let json = try JSONSerialization.jsonObject(with: Data(filesWaitingDetails.utf8)) as? [String: Any] {
+                dir = json["Dir"] as? String ?? ""
+                files = json["Files"] as? [[String: Any]] ?? []
             }
         } catch {
             wg_log(.error, message: "Failed to parse files waiting details: \(error)")
             return "ERROR: Failed to parse files waiting details: \(error)"
         }
-        wg_log(.info, message: "Files waiting details: \(filesWaitingDetails) get result: \(defaults.string(forKey: "FilesWaiting") ?? "nil")")
-        // wg_log(.info, message: "Files waiting details: \(filesWaitingDetails)")
+
+        // Merge into the pending record rather than replacing it. The
+        // staging-mode poller resends the full list until the app consumes
+        // it, and the direct-mode hook reports one file per event; either
+        // way the app may stay suspended for hours between announcements,
+        // and replacing the record dropped every pending file but the
+        // last. Entries are keyed by name and size, so a re-announcement
+        // of a file that is already pending is a no-op.
+        var pendingFiles: [[String: Any]] = []
+        if let current = defaults.string(forKey: PacketTunnelUserDefaultsKey.filesWaiting),
+           let json = try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any],
+           (json["Dir"] as? String ?? "") == dir
+        {
+            pendingFiles = json["Files"] as? [[String: Any]] ?? []
+        }
+        func entryKey(_ f: [String: Any]) -> String {
+            "\(f["Name"] as? String ?? "")|\((f["Size"] as? NSNumber)?.int64Value ?? 0)"
+        }
+        let pendingKeys = Set(pendingFiles.map(entryKey))
+        let newFiles = files.filter { !pendingKeys.contains(entryKey($0)) }
+        if newFiles.isEmpty {
+            wg_log(.info, message: "Received file details already pending for processing. Ignoring.")
+            return ""
+        }
+
+        var remaining = newFiles
+        #if os(iOS)
+            // Import plain photo/video drops into the Photos library right
+            // here, in the extension, at arrival time. The app-side import
+            // (BackgroundTaskManager) only runs while the app process is
+            // alive, so a drop that lands while the app is suspended is not
+            // visible in Photos until the user next opens Cylonix. Anything
+            // not imported (chat attachments, non-media, permission not
+            // granted, import failure) stays in the FilesWaiting record for
+            // the app to handle exactly as before.
+            let (notImported, saved) = importPlainMediaIntoPhotos(dir: dir, files: newFiles)
+            remaining = notImported
+            if !saved.isEmpty {
+                let previewsEnabled = notificationPreviewEnabled()
+                sendUserNotification(
+                    title: saved.count == 1 ? "Saved to Photos" : "\(saved.count) items saved to Photos",
+                    body: previewsEnabled ? saved.joined(separator: ", ") : "Open the Photos app to view.",
+                    identifier: "photos-saved-\(UUID().uuidString)"
+                )
+            }
+            // Every other plain drop goes to the shared File Provider
+            // Storage folder, which the File Provider extension shows in
+            // Files as "Cylonix". Only peer-message attachments are left
+            // for the app, which files them into its chat store.
+            let (notDelivered, delivered) = deliverPlainFilesToSharedDownloads(dir: dir, files: remaining)
+            remaining = notDelivered
+            if !delivered.isEmpty {
+                let previewsEnabled = notificationPreviewEnabled()
+                sendUserNotification(
+                    title: delivered.count == 1 ? "File received" : "\(delivered.count) files received",
+                    body: previewsEnabled
+                        ? "\(delivered.joined(separator: ", ")) saved in Files under Cylonix"
+                        : "Open Files and look under Cylonix.",
+                    identifier: "file-delivered-\(UUID().uuidString)"
+                )
+                signalSharedDownloadsProvider()
+            }
+        #endif
+        if remaining.isEmpty {
+            wg_log(.info, message: "All newly received files handled in the extension; nothing added for the app")
+            return ""
+        }
+
+        let merged = pendingFiles + remaining
+        guard let data = try? JSONSerialization.data(withJSONObject: ["Dir": dir, "Files": merged]),
+              let detailsToStore = String(data: data, encoding: .utf8)
+        else {
+            wg_log(.error, message: "Failed to serialize merged files waiting record")
+            return "ERROR: Failed to serialize merged files waiting record"
+        }
+        defaults.set(detailsToStore, forKey: PacketTunnelUserDefaultsKey.filesWaiting)
+        defaults.synchronize()
+
+        let fileCount = remaining.count
+        let previewsEnabled = notificationPreviewEnabled()
+        let title = previewsEnabled ? "Files Received" : "New file received"
+        let body = previewsEnabled
+            ? (fileCount == 1
+                ? "You received a new file \((remaining.first?["Name"] as? String) ?? "*unnamed*")"
+                : "You received \(fileCount) new files")
+            : "Open Cylonix to view file details."
+        wg_log(.info, message: "Sending User notification of Received \(fileCount) files")
+        sendUserNotification(
+            title: title,
+            body: body,
+            identifier: "file-receipt-\(UUID().uuidString)"
+        )
+        wg_log(.info, message: "Files waiting details stored (\(merged.count) pending): \(detailsToStore)")
         postNotification(notification: PacketTunnelNotification.filesWaiting)
         return ""
     }
+
+    #if os(iOS)
+        /// deliverPlainFilesToSharedDownloads moves plain drops (no
+        /// peer-message transfer ID, and no transfer-ID sidecar next to the
+        /// file) out of the taildrop staging directory into the shared
+        /// Downloads folder. Returns the files it left in place and the
+        /// names it delivered.
+        private func deliverPlainFilesToSharedDownloads(
+            dir: String, files: [[String: Any]]
+        ) -> (remaining: [[String: Any]], delivered: [String]) {
+            guard !dir.isEmpty, !files.isEmpty,
+                  let shared = FileManager.sharedFolderURL?
+                  .appendingPathComponent(SharedDownloads.folderName, isDirectory: true)
+            else {
+                return (files, [])
+            }
+            do {
+                try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+            } catch {
+                wg_log(.error, message: "Shared Downloads: cannot create \(shared.path): \(error)")
+                return (files, [])
+            }
+            var remaining: [[String: Any]] = []
+            var delivered: [String] = []
+            for f in files {
+                let name = f["Name"] as? String ?? ""
+                let transferID = (f["ID"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let source = URL(fileURLWithPath: dir).appendingPathComponent(name)
+                let sidecar = URL(fileURLWithPath: dir).appendingPathComponent(name + ".cylonix-transfer-id")
+                guard !name.isEmpty, transferID.isEmpty,
+                      !FileManager.default.fileExists(atPath: sidecar.path)
+                else {
+                    remaining.append(f)
+                    continue
+                }
+                guard FileManager.default.fileExists(atPath: source.path) else {
+                    wg_log(.error, message: "Shared Downloads: source missing \(source.path)")
+                    remaining.append(f)
+                    continue
+                }
+                let dest = uniqueDestination(in: shared, name: name)
+                do {
+                    try FileManager.default.moveItem(at: source, to: dest)
+                    wg_log(.info, message: "Shared Downloads: delivered \(name) -> \(dest.lastPathComponent)")
+                    delivered.append(dest.lastPathComponent)
+                } catch {
+                    wg_log(.error, message: "Shared Downloads: move failed for \(name): \(error); leaving for the app")
+                    remaining.append(f)
+                }
+            }
+            return (remaining, delivered)
+        }
+
+        private func uniqueDestination(in dir: URL, name: String) -> URL {
+            let fm = FileManager.default
+            var candidate = dir.appendingPathComponent(name)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            let ext = (name as NSString).pathExtension
+            let base = (name as NSString).deletingPathExtension
+            for i in 1 ... 1000 {
+                let n = ext.isEmpty ? "\(base) (\(i))" : "\(base) (\(i)).\(ext)"
+                candidate = dir.appendingPathComponent(n)
+                if !fm.fileExists(atPath: candidate.path) { return candidate }
+            }
+            return dir.appendingPathComponent("\(UUID().uuidString)-\(name)")
+        }
+
+        /// Asks the File Provider to re-enumerate so Files shows the new
+        /// item without waiting for the user to revisit the folder. Best
+        /// effort: Files also re-enumerates when the folder is opened.
+        private func signalSharedDownloadsProvider() {
+            let manager = NSFileProviderManager.default
+            for container in [NSFileProviderItemIdentifier.workingSet, .rootContainer] {
+                manager.signalEnumerator(for: container) { error in
+                    if let error {
+                        wg_log(.error, message: "Shared Downloads: signalEnumerator(\(container.rawValue)) failed: \(error)")
+                    } else {
+                        wg_log(.info, message: "Shared Downloads: signalled \(container.rawValue)")
+                    }
+                }
+            }
+        }
+
+        private func isPhotoLibraryCandidate(_ name: String) -> Bool {
+            let ext = (name as NSString).pathExtension
+            guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else {
+                return false
+            }
+            return type.conforms(to: .image) || type.conforms(to: .movie)
+        }
+
+        /// Physical memory footprint of this process in MB (the number
+        /// jetsam compares against the extension's limit).
+        private func memoryFootprintMB() -> String {
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+                }
+            }
+            guard kr == KERN_SUCCESS else { return "?" }
+            return String(format: "%.1f", Double(info.phys_footprint) / 1_048_576)
+        }
+
+        /// importPlainMediaIntoPhotos moves plain drops (no peer-message
+        /// transfer ID) of photos and videos from the drop directory into
+        /// the Photos library. Never prompts: the extension cannot show the
+        /// TCC dialog, so it only acts when the containing app has already
+        /// obtained add-only access. Returns the files it did not import
+        /// (in their original order) and the names it did.
+        private func importPlainMediaIntoPhotos(
+            dir: String, files: [[String: Any]]
+        ) -> (remaining: [[String: Any]], saved: [String]) {
+            guard !dir.isEmpty else { return (files, []) }
+            func transferID(_ f: [String: Any]) -> String {
+                (f["ID"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let hasCandidate = files.contains { f in
+                transferID(f).isEmpty && isPhotoLibraryCandidate(f["Name"] as? String ?? "")
+            }
+            guard hasCandidate else { return (files, []) }
+
+            let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+            wg_log(.info, message: "NE Photos import: addOnly authorization=\(status.rawValue) footprint=\(memoryFootprintMB())MB")
+            guard status == .authorized || status == .limited else {
+                wg_log(.info, message: "NE Photos import: not authorized; leaving files for the app")
+                return (files, [])
+            }
+
+            var remaining: [[String: Any]] = []
+            var saved: [String] = []
+            for f in files {
+                let name = f["Name"] as? String ?? ""
+                guard transferID(f).isEmpty, isPhotoLibraryCandidate(name) else {
+                    remaining.append(f)
+                    continue
+                }
+                let url = URL(fileURLWithPath: dir).appendingPathComponent(name)
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    wg_log(.error, message: "NE Photos import: source missing \(url.path)")
+                    remaining.append(f)
+                    continue
+                }
+                let ext = (name as NSString).pathExtension
+                let isMovie = UTType(filenameExtension: ext)?.conforms(to: .movie) ?? false
+                let started = Date()
+                do {
+                    try PHPhotoLibrary.shared().performChangesAndWait {
+                        let options = PHAssetResourceCreationOptions()
+                        options.shouldMoveFile = true
+                        let request = PHAssetCreationRequest.forAsset()
+                        request.addResource(
+                            with: isMovie ? .video : .photo,
+                            fileURL: url,
+                            options: options
+                        )
+                    }
+                    let ms = Int(Date().timeIntervalSince(started) * 1000)
+                    wg_log(.info, message: "NE Photos import: imported \(name) in \(ms)ms footprint=\(memoryFootprintMB())MB")
+                    saved.append(name)
+                } catch {
+                    wg_log(.error, message: "NE Photos import failed for \(name): \(error); leaving for the app")
+                    remaining.append(f)
+                }
+            }
+            return (remaining, saved)
+        }
+    #endif
 
     private func handleChatsReceived(_ chatsReceived: String) -> String {
         guard let defaults = sharedDefaults() else {
